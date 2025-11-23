@@ -1,0 +1,9 @@
+# requirements.txt
+pandas
+numpy
+scikit-learn
+xgboost
+optuna
+mlflow
+PyYAML
+dvc
