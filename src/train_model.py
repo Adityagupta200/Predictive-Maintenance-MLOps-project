@@ -16,7 +16,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from utils import load_config, get_logger
+from src.utils import load_config, get_logger
 
 
 LOGGER = get_logger("train_model")
@@ -106,7 +106,7 @@ def objective(
 
         y_pred = pipeline.predict(X_val)
 
-        rmse = float(mean_squared_error(y_val, y_pred, squared=False))
+        rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
         mae = float(mean_absolute_error(y_val, y_pred))
         r2 = float(r2_score(y_val, y_pred))
 

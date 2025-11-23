@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from utils import load_config, get_logger, load_cmapss_txt
+from src.utils import load_config, get_logger, load_cmapss_txt
 
 
 LOGGER = get_logger("data_preprocessing")
