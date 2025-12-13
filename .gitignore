@@ -1,6 +1,5 @@
 /CMaps
 /mlruns
 src/__pycache__/
-dvc.lock
 mlflow.db
-artifacts
+.dvc

@@ -1,0 +1,8 @@
+# requirements-api.txt
+pandas==2.3.3
+numpy==1.26.4
+scikit-learn==1.6.1
+xgboost==2.1.4
+fastapi==0.111.1
+uvicorn==0.30.6
+PyYAML

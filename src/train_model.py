@@ -1,10 +1,12 @@
 # src/train_model.py
+
 import argparse
 import json
 import time
 from pathlib import Path
 from typing import Dict, Any
 
+import joblib  # <-- added
 import mlflow
 import numpy as np
 import optuna
@@ -17,7 +19,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from src.utils import load_config, get_logger
-
 
 LOGGER = get_logger("train_model")
 
@@ -51,7 +52,6 @@ def create_pipeline(trial: optuna.Trial, random_state: int) -> Pipeline:
     """
     Build an XGBoost regressor pipeline with hyperparameters from Optuna.
     """
-    # Hyperparameter search space for XGBRegressor. [web:10][web:7]
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 150, 600),
         "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -90,7 +90,7 @@ def objective(
 ) -> float:
     """
     Optuna objective: minimize validation RMSE.
-    Each trial is logged as a nested MLflow run. [web:7][web:10]
+    Each trial is logged as a nested MLflow run.
     """
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
@@ -99,7 +99,6 @@ def objective(
         mlflow.set_experiment(mlflow_experiment)
 
         pipeline = create_pipeline(trial, random_state=random_state)
-
         start = time.perf_counter()
         pipeline.fit(X_train, y_train)
         train_time = time.perf_counter() - start
@@ -110,14 +109,12 @@ def objective(
         mae = float(mean_absolute_error(y_val, y_pred))
         r2 = float(r2_score(y_val, y_pred))
 
-        # Log params and metrics to MLflow.
         mlflow.log_params(trial.params)
         mlflow.log_metric("rmse", rmse)
         mlflow.log_metric("mae", mae)
         mlflow.log_metric("r2", r2)
         mlflow.log_metric("train_time_sec", train_time)
 
-        # Optionally log a small sample of predictions.
         residuals = y_val - y_pred
         mlflow.log_metric("residuals_std", float(np.std(residuals)))
 
@@ -135,7 +132,9 @@ def train_with_optuna(
     mlflow.set_tracking_uri(mlflow_cfg["tracking_uri"])
     mlflow.set_experiment(mlflow_cfg["experiment_name"])
 
-    study = optuna.create_study(direction="minimize", study_name=train_cfg["study_name"])
+    study = optuna.create_study(
+        direction="minimize", study_name=train_cfg["study_name"]
+    )
 
     mlflow_cb = MLflowCallback(
         tracking_uri=mlflow_cfg["tracking_uri"],
@@ -169,6 +168,7 @@ def log_best_model(
     study: optuna.Study, config: Dict[str, Any], processed_dir: Path
 ) -> None:
     data = load_processed_data(processed_dir)
+
     mlflow_cfg = config["mlflow"]
     train_cfg = config["training"]
 
@@ -219,6 +219,11 @@ def log_best_model(
             "Logged best model to MLflow (registered name: %s)",
             registered_name,
         )
+
+        # --- NEW: persist pipeline locally for FastAPI / deployment ---
+        models_dir = Path("models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipeline, models_dir / "best_model.joblib")
 
 
 def main(config_path: str) -> None:

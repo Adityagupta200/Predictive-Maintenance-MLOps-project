@@ -7,3 +7,5 @@ optuna
 mlflow
 PyYAML
 dvc
+fastapi
+uvicorn
