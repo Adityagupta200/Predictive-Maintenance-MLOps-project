@@ -1,12 +1,11 @@
-# tests/test_imports.py
+import importlib
 import sys
 from pathlib import Path
-import importlib
 
-# Add <repo>/src to sys.path so 'api.*' can be imported
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 def test_import_training_and_api():
-    # Adjust these names if your filenames differ
-    assert importlib.import_module("api.train_model.py")
-    assert importlib.import_module("api.data_preprocessing.py")
+    importlib.import_module("api.main")
+    importlib.import_module("api.train_model")
+    importlib.import_module("api.data_preprocessing")
