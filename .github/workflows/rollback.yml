@@ -1,0 +1,29 @@
+name: rollback-production
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for rollback (link to monitoring alert, etc.)"
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_CONTENTS }}" > "$HOME/.kube/config"
+
+      - name: Roll back last deployment
+        run: |
+          kubectl rollout undo deployment/predictive-maintenance-api
+          kubectl rollout status deployment/predictive-maintenance-api --timeout=180s
