@@ -17,6 +17,11 @@ jobs:
   test-train-validate:
     runs-on: ubuntu-latest
 
+    env:
+      MLFLOW_TRACKING_URI: "file:./mlruns"
+      MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
+
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

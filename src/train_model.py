@@ -1,5 +1,5 @@
-# src/train_model.py
-
+import os
+import mlflow.sklearn
 import argparse
 import json
 import time
@@ -126,18 +126,18 @@ def train_with_optuna(
 ) -> optuna.Study:
     data = load_processed_data(processed_dir)
 
-    mlflow_cfg = config["mlflow"]
-    train_cfg = config["training"]
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
 
-    mlflow.set_tracking_uri(mlflow_cfg["tracking_uri"])
-    mlflow.set_experiment(mlflow_cfg["experiment_name"])
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment_name)
 
     study = optuna.create_study(
         direction="minimize", study_name=train_cfg["study_name"]
     )
 
     mlflow_cb = MLflowCallback(
-        tracking_uri=mlflow_cfg["tracking_uri"],
+        tracking_uri=tracking_uri,
         metric_name="rmse",
     )
 
@@ -169,11 +169,11 @@ def log_best_model(
 ) -> None:
     data = load_processed_data(processed_dir)
 
-    mlflow_cfg = config["mlflow"]
-    train_cfg = config["training"]
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
 
-    mlflow.set_tracking_uri(mlflow_cfg["tracking_uri"])
-    mlflow.set_experiment(mlflow_cfg["experiment_name"])
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment_name)
 
     best_params = study.best_trial.params
 
