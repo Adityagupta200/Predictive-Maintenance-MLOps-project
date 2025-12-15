@@ -37,12 +37,15 @@ jobs:
       - name: Add src to PYTHONPATH
         run: echo "PYTHONPATH=$PWD/src" >> $GITHUB_ENV
 
+      - name: Debug repo tree
+        run: |
+          pwd
+          ls -la
+          ls -la src || true
+          ls -la src/api || true
+
       - name: Run unit tests (PyTest)
         run: pytest -q
-
-
-      - name: Run unit tests (PyTest)
-        run: pytest
 
       - name: Run DVC pipeline (train + evaluate)
         run: dvc repro
