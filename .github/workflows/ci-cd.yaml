@@ -34,6 +34,13 @@ jobs:
           if [ -f requirements-api.txt ]; then pip install -r requirements-api.txt; fi
           pip install pytest
 
+      - name: Add src to PYTHONPATH
+        run: echo "PYTHONPATH=$PWD/src" >> $GITHUB_ENV
+
+      - name: Run unit tests (PyTest)
+        run: pytest -q
+
+
       - name: Run unit tests (PyTest)
         run: pytest
 
