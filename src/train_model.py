@@ -126,8 +126,8 @@ def train_with_optuna(
 ) -> optuna.Study:
     data = load_processed_data(processed_dir)
 
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cb["tracking_uri"])
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cb["experiment_name"])
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
@@ -151,7 +151,7 @@ def train_with_optuna(
         lambda trial: objective(
             trial,
             data=data,
-            mlflow_experiment=mlflow_cfg["experiment_name"],
+            mlflow_experiment=mlflow_cb["experiment_name"],
             random_state=train_cfg["random_state"],
         ),
         n_trials=train_cfg["n_trials"],
@@ -169,8 +169,8 @@ def log_best_model(
 ) -> None:
     data = load_processed_data(processed_dir)
 
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cb["tracking_uri"])
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cb["experiment_name"])
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
@@ -208,7 +208,7 @@ def log_best_model(
         mlflow.log_metric("train_time_full_sec", train_time)
 
         # Log model to MLflow Model Registry if configured.
-        registered_name = mlflow_cfg.get("registered_model_name")
+        registered_name = mlflow_cb.get("registered_model_name")
         mlflow.sklearn.log_model(
             sk_model=pipeline,
             artifact_path="model",
