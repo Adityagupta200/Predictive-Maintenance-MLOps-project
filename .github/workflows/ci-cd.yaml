@@ -80,13 +80,14 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Debug DockerFile presence
+      - name: Debug Dockerfile presence
+        shell: pwsh
         run: |
-          pwd
-          ls -la
-          ls -la infra || true
-          ls -la infra/docker || true
-          test -f infra/docker/DockerFile
+          Get-Location
+          Get-ChildItem -Force
+          if (Test-Path infra) { Get-ChildItem -Force infra }
+          if (Test-Path infra/docker) { Get-ChildItem -Force infra/docker }
+          if (!(Test-Path infra/docker/Dockerfile)) { throw "Dockerfile not found at infra/docker/Dockerfile" }
 
       - name: Build and push image
         id: build
