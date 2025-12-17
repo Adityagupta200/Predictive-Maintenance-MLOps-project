@@ -1,10 +1,6 @@
 name: ci-cd
 
 on:
-  push:
-    branches: ["master"]
-  pull_request:
-    branches: ["master"]
   workflow_dispatch:
 
 env:
@@ -67,7 +63,7 @@ jobs:
 
   deploy:
     needs: test-train-validate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, minikube]
     if: needs.test-train-validate.result == 'success'
 
     env:
@@ -105,10 +101,10 @@ jobs:
         with:
           version: "v1.30.0"
 
-      - name: Configure kubeconfig
+      - name: Verify kubectl context
         run: |
-          mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_CONTENTS }}" > "$HOME/.kube/config"
+          kubectl config current-context
+          kubectl get ns
 
       - name: Deploy new version to Kubernetes
         run: |
