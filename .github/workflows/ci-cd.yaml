@@ -90,7 +90,7 @@ jobs:
           ls -la
           ls -la infra || true
           ls -la infra/docker || true
-          test -f infra/docker/Dockerfile
+          test -f infra/docker/DockerFile
 
       - name: Build and push image
         id: build
