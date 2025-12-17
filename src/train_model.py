@@ -1,13 +1,14 @@
-import os
-import mlflow.sklearn
+# src/train_model.py
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, Any
 
-import joblib  # <-- added
+import joblib
 import mlflow
+import mlflow.sklearn
 import numpy as np
 import optuna
 import pandas as pd
@@ -35,6 +36,7 @@ def load_processed_data(processed_dir: Path) -> Dict[str, Any]:
 
     X_train = train_df[feature_cols].values
     y_train = train_df[target_col].values
+
     X_val = val_df[feature_cols].values
     y_val = val_df[target_col].values
 
@@ -49,9 +51,6 @@ def load_processed_data(processed_dir: Path) -> Dict[str, Any]:
 
 
 def create_pipeline(trial: optuna.Trial, random_state: int) -> Pipeline:
-    """
-    Build an XGBoost regressor pipeline with hyperparameters from Optuna.
-    """
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 150, 600),
         "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -72,33 +71,30 @@ def create_pipeline(trial: optuna.Trial, random_state: int) -> Pipeline:
         **params,
     )
 
-    pipeline = Pipeline(
+    return Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
             ("model", model),
         ]
     )
-    return pipeline
 
 
 def objective(
     trial: optuna.Trial,
     data: Dict[str, Any],
-    mlflow_experiment: str,
+    experiment_name: str,
     random_state: int,
 ) -> float:
-    """
-    Optuna objective: minimize validation RMSE.
-    Each trial is logged as a nested MLflow run.
-    """
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
 
     with mlflow.start_run(run_name=f"trial_{trial.number}", nested=True):
-        mlflow.set_experiment(mlflow_experiment)
+        # Experiment already set in train_with_optuna, but safe to call again
+        mlflow.set_experiment(experiment_name)
 
         pipeline = create_pipeline(trial, random_state=random_state)
+
         start = time.perf_counter()
         pipeline.fit(X_train, y_train)
         train_time = time.perf_counter() - start
@@ -114,27 +110,34 @@ def objective(
         mlflow.log_metric("mae", mae)
         mlflow.log_metric("r2", r2)
         mlflow.log_metric("train_time_sec", train_time)
+        mlflow.log_metric("residuals_std", float(np.std(y_val - y_pred)))
 
-        residuals = y_val - y_pred
-        mlflow.log_metric("residuals_std", float(np.std(residuals)))
-
-    return rmse
+        return rmse
 
 
-def train_with_optuna(
-    config: Dict[str, Any], processed_dir: Path
-) -> optuna.Study:
+def _resolve_mlflow_settings(config: Dict[str, Any]) -> tuple[str, str, str | None]:
+    mlflow_cfg = config["mlflow"]
+
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
+    registered_model_name = os.getenv(
+        "MLFLOW_REGISTERED_MODEL_NAME",
+        mlflow_cfg.get("registered_model_name", ""),
+    ) or None
+
+    return tracking_uri, experiment_name, registered_model_name
+
+
+def train_with_optuna(config: Dict[str, Any], processed_dir: Path) -> optuna.Study:
     data = load_processed_data(processed_dir)
 
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cb["tracking_uri"])
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cb["experiment_name"])
+    train_cfg = config["training"]
+    tracking_uri, experiment_name, _ = _resolve_mlflow_settings(config)
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    study = optuna.create_study(
-        direction="minimize", study_name=train_cfg["study_name"]
-    )
+    study = optuna.create_study(direction="minimize", study_name=train_cfg["study_name"])
 
     mlflow_cb = MLflowCallback(
         tracking_uri=tracking_uri,
@@ -151,7 +154,7 @@ def train_with_optuna(
         lambda trial: objective(
             trial,
             data=data,
-            mlflow_experiment=mlflow_cb["experiment_name"],
+            experiment_name=experiment_name,
             random_state=train_cfg["random_state"],
         ),
         n_trials=train_cfg["n_trials"],
@@ -164,20 +167,17 @@ def train_with_optuna(
     return study
 
 
-def log_best_model(
-    study: optuna.Study, config: Dict[str, Any], processed_dir: Path
-) -> None:
+def log_best_model(study: optuna.Study, config: Dict[str, Any], processed_dir: Path) -> None:
     data = load_processed_data(processed_dir)
 
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cb["tracking_uri"])
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cb["experiment_name"])
+    train_cfg = config["training"]
+    tracking_uri, experiment_name, registered_model_name = _resolve_mlflow_settings(config)
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
     best_params = study.best_trial.params
 
-    # Build pipeline using the best hyperparameters.
     def pipeline_from_params(params: Dict[str, Any]) -> Pipeline:
         model = xgb.XGBRegressor(
             objective="reg:squarederror",
@@ -207,23 +207,19 @@ def log_best_model(
         mlflow.log_params(best_params)
         mlflow.log_metric("train_time_full_sec", train_time)
 
-        # Log model to MLflow Model Registry if configured.
-        registered_name = mlflow_cb.get("registered_model_name")
+        # Log the model to MLflow
         mlflow.sklearn.log_model(
             sk_model=pipeline,
             artifact_path="model",
-            registered_model_name=registered_name,
+            registered_model_name=registered_model_name,
         )
 
-        LOGGER.info(
-            "Logged best model to MLflow (registered name: %s)",
-            registered_name,
-        )
+    # Persist pipeline locally for API deployment
+    models_dir = Path("models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipeline, models_dir / "best_model.joblib")
 
-        # --- NEW: persist pipeline locally for FastAPI / deployment ---
-        models_dir = Path("models")
-        models_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipeline, models_dir / "best_model.joblib")
+    LOGGER.info("Saved best model pipeline to %s", models_dir / "best_model.joblib")
 
 
 def main(config_path: str) -> None:
