@@ -84,7 +84,7 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Debug Dockerfile presence
+      - name: Debug DockerFile presence
         run: |
           pwd
           ls -la
@@ -96,7 +96,7 @@ jobs:
         id: build
         run: |
           IMAGE="${{ env.IMAGE_REPO }}:${IMAGE_TAG}"
-          docker build -f infra/docker/Dockerfile -t "$IMAGE" .
+          docker build -f infra/docker/DockerFile -t "$IMAGE" .
           docker push "$IMAGE"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
