@@ -70,6 +70,10 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }} 
 
+    defaults:
+    run:
+      shell: pwsh
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
