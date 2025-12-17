@@ -85,6 +85,14 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      - name: Debug Dockerfile presence
+        run: |
+          pwd
+          ls -la
+          ls -la infra || true
+          ls -la infra/docker || true
+          test -f infra/docker/Dockerfile
+
       - name: Build and push image
         id: build
         run: |
