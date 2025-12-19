@@ -2,7 +2,6 @@ name: ci-cd
 
 on:
   workflow_dispatch:
-    branches: ["master"]
 
 env:
   PYTHON_VERSION: "3.11"
@@ -72,8 +71,8 @@ jobs:
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }} 
 
     defaults:
-    run:
-      shell: pwsh
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout repository
@@ -97,10 +96,10 @@ jobs:
       - name: Build and push image
         id: build
         run: |
-          IMAGE="${{ env.IMAGE_REPO }}:${IMAGE_TAG}"
-          docker build -f infra/docker/DockerFile -t "$IMAGE" .
-          docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          $IMAGE = "${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}"
+          docker build -f infra/docker/Dockerfile -t $IMAGE .
+          docker push $IMAGE
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "image=$IMAGE"
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
