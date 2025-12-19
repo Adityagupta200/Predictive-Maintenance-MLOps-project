@@ -106,6 +106,12 @@ jobs:
         with:
           version: "v1.30.0"
 
+      - name: Ensure minikube is running
+        shell: powershell
+        run: |
+          docker start minikube
+          minikube update-context
+
       - name: Verify kubectl context
         run: |
           kubectl config current-context
