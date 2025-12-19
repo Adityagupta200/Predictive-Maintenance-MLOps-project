@@ -72,7 +72,7 @@ jobs:
 
     defaults:
       run:
-        shell: pwsh
+        shell: powershell
 
     steps:
       - name: Checkout repository
@@ -84,20 +84,20 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Debug Dockerfile presence
-        shell: pwsh
+      - name: Debug DockerFile presence
+        shell: powershell
         run: |
           Get-Location
           Get-ChildItem -Force
           if (Test-Path infra) { Get-ChildItem -Force infra }
           if (Test-Path infra/docker) { Get-ChildItem -Force infra/docker }
-          if (!(Test-Path infra/docker/DockerFile)) { throw "Dockerfile not found at infra/docker/Dockerfile" }
+          if (!(Test-Path infra/docker/DockerFile)) { throw "DockerFile not found at infra/docker/DockerFile" }
 
       - name: Build and push image
         id: build
         run: |
           $IMAGE = "${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}"
-          docker build -f infra/docker/Dockerfile -t $IMAGE .
+          docker build -f infra/docker/DockerFile -t $IMAGE .
           docker push $IMAGE
           Add-Content -Path $env:GITHUB_OUTPUT -Value "image=$IMAGE"
 
@@ -113,7 +113,6 @@ jobs:
 
       - name: Deploy new version to Kubernetes
         run: |
-          IMAGE="${{ steps.build.outputs.image }}"
-          kubectl set image deployment/predictive-maintenance-api \
-            api="$IMAGE" --record
+          $IMAGE = "${{ steps.build.outputs.image }}"
+          kubectl set image deployment/predictive-maintenance-api "api=$IMAGE"
           kubectl rollout status deployment/predictive-maintenance-api --timeout=180s
