@@ -91,7 +91,7 @@ jobs:
           Get-ChildItem -Force
           if (Test-Path infra) { Get-ChildItem -Force infra }
           if (Test-Path infra/docker) { Get-ChildItem -Force infra/docker }
-          if (!(Test-Path infra/docker/Dockerfile)) { throw "Dockerfile not found at infra/docker/Dockerfile" }
+          if (!(Test-Path infra/docker/DockerFile)) { throw "Dockerfile not found at infra/docker/Dockerfile" }
 
       - name: Build and push image
         id: build
