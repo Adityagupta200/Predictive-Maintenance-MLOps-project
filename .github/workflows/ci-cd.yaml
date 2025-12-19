@@ -106,11 +106,25 @@ jobs:
         with:
           version: "v1.30.0"
 
-      - name: Ensure minikube is running
+      - name: Ensure minikube is running (and wait)
         shell: powershell
         run: |
-          docker start minikube
+          minikube start --driver=docker
+          minikube status
           minikube update-context
+
+          # Wait until apiserver is ready
+          $ok = $false
+          for ($i=0; $i -lt 30; $i++) {
+            try {
+              kubectl get --raw='/readyz' | Out-Host
+              $ok = $true
+              break
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+          if (-not $ok) { throw "Minikube apiserver not ready" }
 
       - name: Verify kubectl context
         run: |
