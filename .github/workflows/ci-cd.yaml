@@ -12,11 +12,9 @@ env:
 jobs:
   test-train-validate:
     runs-on: ubuntu-latest
-
     env:
       MLFLOW_TRACKING_URI: "file:./mlruns"
       MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
-
 
     steps:
       - name: Checkout repository
@@ -51,6 +49,20 @@ jobs:
       - name: Run DVC pipeline (train + evaluate)
         run: dvc repro
 
+      # NEW: ensure the model exists where the Docker build expects it
+      - name: Verify model artifact exists
+        run: |
+          ls -la models || true
+          test -f models/bestmodel.joblib
+
+      # NEW: upload the trained model so deploy job can include it in the image
+      - name: Upload model artifact for deploy
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifact
+          path: models/bestmodel.joblib
+          if-no-files-found: error
+
       - name: Enforce quality gate
         env:
           MLFLOW_TRACKING_URI: "file:./mlruns"
@@ -60,15 +72,13 @@ jobs:
           ACCURACY_THRESHOLD: "0.90"
         run: python .github/scripts/check_accuracy_gate.py
 
-
   deploy:
     needs: test-train-validate
     runs-on: [self-hosted, minikube]
     if: needs.test-train-validate.result == 'success'
-
     env:
       IMAGE_TAG: ${{ github.sha }}
-      IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }} 
+      IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
 
     defaults:
       run:
@@ -78,6 +88,33 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # NEW: download model built in the previous job
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifact
+          path: .github_artifacts
+
+      # NEW: place model in the Docker build context at models/bestmodel.joblib
+      - name: Place model into Docker build context
+        run: |
+          New-Item -ItemType Directory -Force models | Out-Null
+
+          $candidate1 = ".github_artifacts/models/bestmodel.joblib"
+          $candidate2 = ".github_artifacts/bestmodel.joblib"
+
+          if (Test-Path $candidate1) {
+            Copy-Item -Force $candidate1 "models/bestmodel.joblib"
+          } elseif (Test-Path $candidate2) {
+            Copy-Item -Force $candidate2 "models/bestmodel.joblib"
+          } else {
+            Write-Host "Downloaded artifact contents:"
+            Get-ChildItem -Recurse -Force .github_artifacts | Out-Host
+            throw "Model file not found in downloaded artifact."
+          }
+
+          if (!(Test-Path "models/bestmodel.joblib")) { throw "Model file missing in build context." }
+
       - name: Log in to Docker registry
         uses: docker/login-action@v3
         with:
@@ -85,7 +122,6 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Debug DockerFile presence
-        shell: powershell
         run: |
           Get-Location
           Get-ChildItem -Force
@@ -107,7 +143,6 @@ jobs:
           version: "v1.30.0"
 
       - name: Ensure minikube is running (and wait)
-        shell: powershell
         run: |
           minikube start --driver=docker
           minikube status
@@ -115,7 +150,7 @@ jobs:
 
           # Wait until apiserver is ready
           $ok = $false
-          for ($i=0; $i -lt 30; $i++) {
+          for ($i = 0; $i -lt 30; $i++) {
             try {
               kubectl get --raw='/readyz' | Out-Host
               $ok = $true
@@ -135,4 +170,15 @@ jobs:
         run: |
           $IMAGE = "${{ steps.build.outputs.image }}"
           kubectl set image deployment/predictive-maintenance-api "api=$IMAGE"
-          kubectl rollout status deployment/predictive-maintenance-api --timeout=180s
+          kubectl rollout status deployment/predictive-maintenance-api --timeout=600s
+
+      # NEW: if rollout fails, dump useful diagnostics (doesn't change behavior otherwise)
+      - name: Debug rollout failure
+        if: failure()
+        run: |
+          kubectl get deploy predictive-maintenance-api -o wide
+          kubectl describe deploy predictive-maintenance-api
+          kubectl get rs -l app=predictive-maintenance-api -o wide
+          kubectl get pods -l app=predictive-maintenance-api -o wide
+          kubectl describe pods -l app=predictive-maintenance-api
+          kubectl logs -l app=predictive-maintenance-api --all-containers=true --tail=200
