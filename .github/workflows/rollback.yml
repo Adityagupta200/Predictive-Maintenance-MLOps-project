@@ -1,16 +1,35 @@
 name: rollback-production
 
 on:
+  # Manual rollback (kept exactly as a supported path)
   workflow_dispatch:
     inputs:
       reason:
         description: "Reason for rollback (link to monitoring alert, etc.)"
         required: true
         type: string
+      to_revision:
+        description: "Optional: rollback to a specific revision number (leave empty to rollback to previous)"
+        required: false
+        type: string
+
+  # Automated trigger (from monitoring/webhook)
+  # Example event_type: model_degraded
+  repository_dispatch:
+    types: [model_degraded]
 
 jobs:
   rollback:
     runs-on: ubuntu-latest
+
+    # Prevent two rollbacks from running at the same time
+    concurrency:
+      group: rollback-production
+      cancel-in-progress: false
+
+    env:
+      DEPLOYMENT_NAME: predictive-maintenance-api
+      NAMESPACE: default
 
     steps:
       - name: Install kubectl
@@ -19,11 +38,71 @@ jobs:
           version: "v1.30.0"
 
       - name: Configure kubeconfig
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$HOME/.kube"
-          echo "${{ secrets.KUBECONFIG_CONTENTS }}" > "$HOME/.kube/config"
+          if [ -z "${{ secrets.KUBECONFIG_CONTENTS }}" ]; then
+            echo "KUBECONFIG_CONTENTS secret is missing or empty."
+            exit 1
+          fi
+          cat > "$HOME/.kube/config" << 'EOF'
+          ${{ secrets.KUBECONFIG_CONTENTS }}
+          EOF
 
-      - name: Roll back last deployment
+      - name: Resolve rollback inputs (manual vs automated)
+        id: vars
+        shell: bash
         run: |
-          kubectl rollout undo deployment/predictive-maintenance-api
-          kubectl rollout status deployment/predictive-maintenance-api --timeout=180s
+          set -euo pipefail
+
+          EVENT_NAME="${{ github.event_name }}"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            REASON="${{ inputs.reason }}"
+            TO_REVISION="${{ inputs.to_revision }}"
+          else
+            # repository_dispatch payload lives under github.event.client_payload
+            REASON="${{ github.event.client_payload.reason }}"
+            TO_REVISION="${{ github.event.client_payload.to_revision }}"
+          fi
+
+          if [ -z "${REASON:-}" ]; then
+            echo "Rollback reason is required (inputs.reason or client_payload.reason)."
+            exit 1
+          fi
+
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "to_revision=${TO_REVISION:-}" >> "$GITHUB_OUTPUT"
+
+      - name: Show current deployment state (pre-rollback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Rollback reason: ${{ steps.vars.outputs.reason }}"
+          kubectl -n "${NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o wide
+          kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT_NAME}"
+
+      - name: Roll back deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TO_REV="${{ steps.vars.outputs.to_revision }}"
+
+          if [ -n "${TO_REV}" ]; then
+            # Roll back to a specific revision when provided
+            kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}" --to-revision="${TO_REV}"
+          else
+            # Default: roll back to previous revision
+            kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}"
+          fi
+
+          kubectl -n "${NAMESPACE}" rollout status deployment/"${DEPLOYMENT_NAME}" --timeout=180s
+
+      - name: Show deployment state (post-rollback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o wide
+          kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT_NAME}"
