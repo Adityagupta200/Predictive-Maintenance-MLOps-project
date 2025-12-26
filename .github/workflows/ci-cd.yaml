@@ -53,14 +53,14 @@ jobs:
       - name: Verify model artifact exists
         run: |
           ls -la models || true
-          test -f models/bestmodel.joblib
+          test -f models/best_model.joblib
 
       # NEW: upload the trained model so deploy job can include it in the image
       - name: Upload model artifact for deploy
         uses: actions/upload-artifact@v4
         with:
           name: model-artifact
-          path: models/bestmodel.joblib
+          path: models/best_model.joblib
           if-no-files-found: error
 
       - name: Enforce quality gate
@@ -95,25 +95,25 @@ jobs:
           name: model-artifact
           path: .github_artifacts
 
-      # NEW: place model in the Docker build context at models/bestmodel.joblib
+      # NEW: place model in the Docker build context at models/best_model.joblib
       - name: Place model into Docker build context
         run: |
           New-Item -ItemType Directory -Force models | Out-Null
 
-          $candidate1 = ".github_artifacts/models/bestmodel.joblib"
-          $candidate2 = ".github_artifacts/bestmodel.joblib"
+          $candidate1 = ".github_artifacts/models/best_model.joblib"
+          $candidate2 = ".github_artifacts/best_model.joblib"
 
           if (Test-Path $candidate1) {
-            Copy-Item -Force $candidate1 "models/bestmodel.joblib"
+            Copy-Item -Force $candidate1 "models/best_model.joblib"
           } elseif (Test-Path $candidate2) {
-            Copy-Item -Force $candidate2 "models/bestmodel.joblib"
+            Copy-Item -Force $candidate2 "models/best_model.joblib"
           } else {
             Write-Host "Downloaded artifact contents:"
             Get-ChildItem -Recurse -Force .github_artifacts | Out-Host
             throw "Model file not found in downloaded artifact."
           }
 
-          if (!(Test-Path "models/bestmodel.joblib")) { throw "Model file missing in build context." }
+          if (!(Test-Path "models/best_model.joblib")) { throw "Model file missing in build context." }
 
       - name: Log in to Docker registry
         uses: docker/login-action@v3
