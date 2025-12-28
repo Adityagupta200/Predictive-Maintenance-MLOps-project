@@ -5,7 +5,8 @@ metadata:
   labels:
     app: predictive-maintenance-api
 spec:
-  replicas: 3
+  # Reduced replicas for minimal-cost demo; still production-sane with probes + resources.
+  replicas: 1
   selector:
     matchLabels:
       app: predictive-maintenance-api
@@ -15,27 +16,28 @@ spec:
         app: predictive-maintenance-api
     spec:
       containers:
-      - name: api
-        image: adityagupta20/predictive-maintenance-api:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8000
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          initialDelaySeconds: 15
-          periodSeconds: 20
-        resources:
-          requests:
-            cpu: "250m"
-            memory: "256Mi"
-          limits:
-            cpu: "1"
-            memory: "512Mi"
+        - name: api
+          # Placeholder tag (avoid mutable 'latest'); CI/CD overrides this via kubectl set image.
+          image: adityagupta20/predictive-maintenance-api:placeholder
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"

@@ -24,3 +24,8 @@ variable "key_name" {
   type        = string
   description = "Name of existing EC2 key pair"
 }
+
+variable "docker_image" {
+  type        = string
+  description = "Fully-qualified Docker image (repo:tag) for the API EC2 instance"
+}

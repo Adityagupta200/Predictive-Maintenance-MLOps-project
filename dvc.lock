@@ -19,14 +19,18 @@ stages:
       hash: md5
       md5: 8b510e2c1460ba87214f58ceb3cd0266
       size: 10350705
+    - path: artifacts/processed/data_validation.json
+      hash: md5
+      md5: 88253f5a164132fb24ed5134da3401a8
+      size: 6800
     - path: params.yaml
       hash: md5
       md5: 74f39069d73d7e1f2496519dc4eab9cf
       size: 474
     - path: src/data_preprocessing.py
       hash: md5
-      md5: 931e6196749cf1c1cc3a38f55de6fc99
-      size: 4748
+      md5: bd6935b44a984da1d35350e2c837c087
+      size: 4051
     - path: src/utils.py
       hash: md5
       md5: 21ac8ead13ede6ced37a533518e905b7
@@ -65,19 +69,59 @@ stages:
       size: 474
     - path: src/train_model.py
       hash: md5
-      md5: 3e48e28e4cf20f421bb1aa7dafc33b6e
-      size: 7578
+      md5: 258079654c2c1c46dcfa5bcfe076fd4c
+      size: 10477
     - path: src/utils.py
       hash: md5
       md5: 21ac8ead13ede6ced37a533518e905b7
       size: 1398
     outs:
+    - path: artifacts/metrics/metrics.json
+      hash: md5
+      md5: 90655c5d132d9cbbd2b85c931486986f
+      size: 735
     - path: mlruns
       hash: md5
-      md5: 6073923caa6754410c1c3bbc4e36b2bb.dir
-      size: 16580372
-      nfiles: 5
+      md5: 3c51e8bc8e5d9884c916a8db4ecc71d3.dir
+      size: 8912153
+      nfiles: 1531
     - path: models/best_model.joblib
       hash: md5
-      md5: 2c82e80113d347728e2bbcbfdcb7dd39
-      size: 16579494
+      md5: 3509421ddb33641cdc44d35aac7c44cc
+      size: 8841987
+  validate_data:
+    cmd: python -m src.validate_data --config params.yaml
+    deps:
+    - path: CMaps/train_FD001.txt
+      hash: md5
+      md5: 259f340bac32ce6fa8894815600fa757
+      size: 3515356
+    - path: CMaps/train_FD002.txt
+      hash: md5
+      md5: b6eaab2a6b589e5e41d43ca2f99e379b
+      size: 9082480
+    - path: CMaps/train_FD003.txt
+      hash: md5
+      md5: 81298e81977a53aa268ad500ac42b2d7
+      size: 4213862
+    - path: CMaps/train_FD004.txt
+      hash: md5
+      md5: 8b510e2c1460ba87214f58ceb3cd0266
+      size: 10350705
+    - path: params.yaml
+      hash: md5
+      md5: 74f39069d73d7e1f2496519dc4eab9cf
+      size: 474
+    - path: src/utils.py
+      hash: md5
+      md5: 21ac8ead13ede6ced37a533518e905b7
+      size: 1398
+    - path: src/validate_data.py
+      hash: md5
+      md5: 5eea3b88706ee0d1a86cfc0a987bc00d
+      size: 5189
+    outs:
+    - path: artifacts/processed/data_validation.json
+      hash: md5
+      md5: 88253f5a164132fb24ed5134da3401a8
+      size: 6800

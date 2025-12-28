@@ -1,7 +1,7 @@
 name: rollback-production
 
 on:
-  # Manual rollback (kept exactly as a supported path)
+  # Manual rollback
   workflow_dispatch:
     inputs:
       reason:
@@ -14,7 +14,6 @@ on:
         type: string
 
   # Automated trigger (from monitoring/webhook)
-  # Example event_type: model_degraded
   repository_dispatch:
     types: [model_degraded]
 
@@ -28,41 +27,44 @@ jobs:
       cancel-in-progress: false
 
     env:
+      AWS_REGION: ap-south-1
+      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
       DEPLOYMENT_NAME: predictive-maintenance-api
       NAMESPACE: default
 
     steps:
+      - name: Checkout repository (for manifests / docs, optional)
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: "v1.30.0"
 
-      - name: Configure kubeconfig
-        shell: bash
+      - name: Configure kubectl for EKS
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.kube"
-          if [ -z "${{ secrets.KUBECONFIG_CONTENTS }}" ]; then
-            echo "KUBECONFIG_CONTENTS secret is missing or empty."
-            exit 1
-          fi
-          cat > "$HOME/.kube/config" << 'EOF'
-          ${{ secrets.KUBECONFIG_CONTENTS }}
-          EOF
+          aws eks update-kubeconfig \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}"
 
       - name: Resolve rollback inputs (manual vs automated)
         id: vars
         shell: bash
         run: |
           set -euo pipefail
-
           EVENT_NAME="${{ github.event_name }}"
 
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             REASON="${{ inputs.reason }}"
             TO_REVISION="${{ inputs.to_revision }}"
           else
-            # repository_dispatch payload lives under github.event.client_payload
             REASON="${{ github.event.client_payload.reason }}"
             TO_REVISION="${{ github.event.client_payload.to_revision }}"
           fi
@@ -72,7 +74,7 @@ jobs:
             exit 1
           fi
 
-          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
           echo "to_revision=${TO_REVISION:-}" >> "$GITHUB_OUTPUT"
 
       - name: Show current deployment state (pre-rollback)
@@ -87,14 +89,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           TO_REV="${{ steps.vars.outputs.to_revision }}"
 
           if [ -n "${TO_REV}" ]; then
-            # Roll back to a specific revision when provided
             kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}" --to-revision="${TO_REV}"
           else
-            # Default: roll back to previous revision
             kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}"
           fi
 

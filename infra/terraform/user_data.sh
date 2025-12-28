@@ -7,8 +7,9 @@ apt-get install -y docker.io
 systemctl enable docker
 systemctl start docker
 
-# Define Docker image
-DOCKER_IMAGE="adityagupta20/predictive-maintenance-api:latest"
+# Docker image injected by Terraform templatefile (repo:tag), e.g.
+# adityagupta20/predictive-maintenance-api:<commit-sha>
+DOCKER_IMAGE="${docker_image}"
 
 # Pull the Docker image
 docker pull "${DOCKER_IMAGE}"

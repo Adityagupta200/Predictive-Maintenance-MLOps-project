@@ -52,7 +52,10 @@ resource "aws_instance" "api_server" {
 
   associate_public_ip_address = true
 
-  user_data = file("${path.module}/user_data.sh")
+  # CHANGED: render user_data from a template so we can inject an immutable Docker image tag
+  user_data = templatefile("${path.module}/user_data.sh", {
+    docker_image = var.docker_image
+  })
 
   tags = {
     Name = "predictive-maintenance-api"

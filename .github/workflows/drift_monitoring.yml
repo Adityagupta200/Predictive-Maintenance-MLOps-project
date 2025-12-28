@@ -1,0 +1,37 @@
+name: Drift Monitoring
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          pip install evidently
+
+      - name: Run drift check
+        env:
+          DRIFT_PSI_THRESHOLD: "0.2"
+        run: |
+          python scripts/drift_check.py \
+            --reference artifacts/processed/train.csv \
+            --current artifacts/processed/val.csv \
+            --out_dir reports
+
+      - name: Upload drift reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-reports
+          path: reports/

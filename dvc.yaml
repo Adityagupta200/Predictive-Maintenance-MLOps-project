@@ -1,10 +1,24 @@
 stages:
+  validate_data:
+    cmd: python -m src.validate_data --config params.yaml
+    deps:
+      - src/validate_data.py
+      - src/utils.py
+      - params.yaml
+      - CMaps/train_FD001.txt
+      - CMaps/train_FD002.txt
+      - CMaps/train_FD003.txt
+      - CMaps/train_FD004.txt
+    outs:
+      - artifacts/processed/data_validation.json
+
   preprocess:
     cmd: python -m src.data_preprocessing --config params.yaml
     deps:
       - src/data_preprocessing.py
       - src/utils.py
       - params.yaml
+      - artifacts/processed/data_validation.json
       - CMaps/train_FD001.txt
       - CMaps/train_FD002.txt
       - CMaps/train_FD003.txt
@@ -23,6 +37,8 @@ stages:
       - artifacts/processed/train.csv
       - artifacts/processed/val.csv
       - artifacts/processed/meta_features.json
+    metrics:
+      - artifacts/metrics/metrics.json
     outs:
-      - mlruns
       - models/best_model.joblib
+      - mlruns

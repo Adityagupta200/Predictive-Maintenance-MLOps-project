@@ -1,13 +1,19 @@
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
+
+from loguru import logger
 import joblib
+
 
 def load_model(model_path: Path) -> Optional[Any]:
     if not model_path.exists():
-        print(f"Warning: model file not found at {model_path}")
+        logger.warning("Model file not found at {}", str(model_path))
         return None
+
     try:
-        return joblib.load(model_path)
+        model = joblib.load(model_path)
+        logger.info("Model loaded from {}", str(model_path))
+        return model
     except Exception as exc:
-        print(f"Error loading model from {model_path}: {exc}")
-    return None
+        logger.exception("Error loading model from {}: {}", str(model_path), exc)
+        return None
