@@ -1,19 +1,15 @@
-# .github/scripts/check_accuracy_gate.py
-
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import mlflow
 from mlflow.tracking import MlflowClient
 
 DEFAULT_METRICS_PATH = "artifacts/metrics/metrics.json"
-
 DEFAULT_TRACKING_URI = "file:./mlruns"
 DEFAULT_EXPERIMENT = "cmapss_rul_xgb_optuna"
-
 DEFAULT_METRIC_NAME = "r2"
 DEFAULT_METRIC_MODE = "max"
 DEFAULT_THRESHOLD = 0.90
@@ -36,14 +32,14 @@ def _pass(msg: str) -> None:
     sys.exit(0)
 
 
-def read_metrics_json(metrics_path: Path) -> Dict[str, Any]:
+def _read_metrics_json(metrics_path: Path) -> Dict[str, Any]:
     obj = json.loads(metrics_path.read_text(encoding="utf-8"))
     if "metrics" not in obj or not isinstance(obj["metrics"], dict):
         raise ValueError("metrics.json missing top-level 'metrics' dict.")
     return obj
 
 
-def best_metric_value_mlflow(runs, metric_name: str, mode: str) -> float:
+def _best_metric_value_mlflow(runs, metric_name: str, mode: str) -> float:
     vals = []
     for r in runs:
         if metric_name in r.data.metrics:
@@ -58,7 +54,7 @@ def best_metric_value_mlflow(runs, metric_name: str, mode: str) -> float:
 def main() -> None:
     metric_name = os.getenv("METRIC_NAME", DEFAULT_METRIC_NAME).strip()
 
-    # Backward compatibility: accept old env names used in your workflow
+    # Backward compatibility (old name)
     threshold_str = os.getenv("METRIC_THRESHOLD", os.getenv("ACCURACY_THRESHOLD", str(DEFAULT_THRESHOLD)))
     try:
         threshold = float(threshold_str)
@@ -71,9 +67,9 @@ def main() -> None:
 
     metrics_path = Path(os.getenv("METRICS_PATH", DEFAULT_METRICS_PATH))
 
-    # Preferred path: deterministic file-based gate
+    # Preferred: deterministic file gate
     if metrics_path.exists():
-        obj = read_metrics_json(metrics_path)
+        obj = _read_metrics_json(metrics_path)
         metrics = obj["metrics"]
         if metric_name not in metrics:
             _fail(f"metrics.json does not contain metric {metric_name!r}. Available: {list(metrics.keys())}")
@@ -101,8 +97,7 @@ def main() -> None:
         order_by=["attributes.start_time DESC"],
         max_results=2000,
     )
-
-    best = best_metric_value_mlflow(runs, metric_name, mode)
+    best = _best_metric_value_mlflow(runs, metric_name, mode)
     print(f"Gate metric from MLflow: best {metric_name} (mode={mode}) in {experiment_name!r}: {best:.6f}")
 
     if mode == "max" and best < threshold:

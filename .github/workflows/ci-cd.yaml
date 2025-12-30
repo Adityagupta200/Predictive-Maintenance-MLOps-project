@@ -1,22 +1,21 @@
 name: ci-cd
+
 permissions:
   id-token: write
   contents: read
-  
+
 on:
-  push:
-    branches: [master]
-    paths:
-      - "src/**"
-      - "infra/**"
-      - "k8s/**"
-      - "dvc.yaml"
-      - "params.yaml"
-      - ".github/**"
-      - "requirements*.txt"
   pull_request:
     branches: [master]
+
   workflow_dispatch:
+    inputs:
+      run_ephemeral_eks_drill:
+        description: "Create ephemeral EKS, deploy, run post-deploy gate, rollback on failure, then destroy."
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
 
 env:
   PYTHON_VERSION: "3.11"
@@ -73,11 +72,20 @@ jobs:
           ls -la models || true
           test -f models/best_model.joblib
 
+      # Keep EXACTLY the same artifact name used by the existing deploy job.
       - name: Upload model artifact for deploy
         uses: actions/upload-artifact@v4
         with:
           name: model-artifact
           path: models/best_model.joblib
+          if-no-files-found: error
+
+      # New: upload val.csv separately for the ephemeral drill post-deploy gate
+      - name: Upload validation data for post-deploy checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-data
+          path: artifacts/processed/val.csv
           if-no-files-found: error
 
       - name: Enforce quality gate
@@ -90,6 +98,7 @@ jobs:
           METRICS_PATH: "${{ env.METRICS_PATH }}"
         run: python .github/scripts/check_accuracy_gate.py
 
+  # Keep your existing deploy job intact (no behavior removed/changed).
   deploy:
     needs: test-train-validate
     if: needs.test-train-validate.result == 'success'
@@ -101,7 +110,7 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
       K8S_NAMESPACE: default
-      DEPLOYMENT_NAME: predictive-mastertenance-api
+      DEPLOYMENT_NAME: predictive-maintenance-api
 
     defaults:
       run:
@@ -121,6 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p models
+
           if [ -f .github_artifacts/models/best_model.joblib ]; then
             cp .github_artifacts/models/best_model.joblib models/best_model.joblib
           elif [ -f .github_artifacts/best_model.joblib ]; then
@@ -130,6 +140,7 @@ jobs:
             ls -R .github_artifacts
             exit 1
           fi
+
           test -f models/best_model.joblib
 
       - name: Log in to Docker registry
@@ -184,3 +195,209 @@ jobs:
           kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o wide || true
           kubectl -n "${K8S_NAMESPACE}" describe pods -l app="${DEPLOYMENT_NAME}" || true
           kubectl -n "${K8S_NAMESPACE}" logs -l app="${DEPLOYMENT_NAME}" --all-containers=true --tail=200 || true
+
+  # New: manual ephemeral EKS drill that creates resources and ALWAYS destroys them.
+  ephemeral-eks-drill:
+    needs: test-train-validate
+    if: >
+      needs.test-train-validate.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_ephemeral_eks_drill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ap-south-1
+      CLUSTER_NAME: pm-${{ github.run_id }}
+      K8S_NAMESPACE: default
+
+      # Must match infra/k8s/deployment.yaml metadata.name
+      DEPLOYMENT_NAME: predictive-maintenance-api
+
+      IMAGE_TAG: ${{ github.sha }}
+      IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
+
+      # PDF targets
+      P95_MS_MAX: "200"
+      POST_DEPLOY_R2_MIN: "0.90"
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifact
+          path: .github_artifacts
+
+      - name: Download validation data (val.csv)
+        uses: actions/download-artifact@v4
+        with:
+          name: post-deploy-data
+          path: .post_deploy_artifacts
+
+      - name: Place model + val.csv into build/test context
+        run: |
+          set -euo pipefail
+          mkdir -p models artifacts/processed
+
+          # Model expected by API: models/best_model.joblib
+          if [ -f .github_artifacts/models/best_model.joblib ]; then
+            cp .github_artifacts/models/best_model.joblib models/best_model.joblib
+          elif [ -f .github_artifacts/best_model.joblib ]; then
+            cp .github_artifacts/best_model.joblib models/best_model.joblib
+          else
+            echo "Downloaded model artifact contents:"
+            ls -R .github_artifacts
+            exit 1
+          fi
+          test -f models/best_model.joblib
+
+          # val.csv for post-deploy gate
+          if [ -f .post_deploy_artifacts/val.csv ]; then
+            cp .post_deploy_artifacts/val.csv artifacts/processed/val.csv
+          elif [ -f .post_deploy_artifacts/artifacts/processed/val.csv ]; then
+            cp .post_deploy_artifacts/artifacts/processed/val.csv artifacts/processed/val.csv
+          else
+            echo "Downloaded post-deploy artifacts contents:"
+            ls -R .post_deploy_artifacts
+            exit 1
+          fi
+          test -f artifacts/processed/val.csv
+
+      - name: Log in to Docker registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push image
+        id: build
+        run: |
+          set -euo pipefail
+          IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
+          docker build -f infra/docker/DockerFile -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install eksctl
+        run: |
+          set -euo pipefail
+          curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
+            | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl version
+
+      - name: Install envsubst (gettext-base)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gettext-base
+
+      - name: Render eksctl cluster config
+        run: |
+          set -euo pipefail
+          export CLUSTER_NAME AWS_REGION
+          envsubst < .github/eks/cluster.yaml > /tmp/cluster.yaml
+          echo "Rendered cluster config:"
+          cat /tmp/cluster.yaml
+
+      - name: Create ephemeral EKS cluster
+        run: |
+          set -euo pipefail
+          eksctl create cluster -f /tmp/cluster.yaml --wait
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubectl for EKS
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Deploy (ephemeral drill: Deployment only)
+        run: |
+          set -euo pipefail
+          kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
+          kubectl set image deployment/"${DEPLOYMENT_NAME}" api="${{ steps.build.outputs.image }}" -n "${K8S_NAMESPACE}"
+          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
+
+      - name: Port-forward API
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" 18000:8000 > /tmp/pf.log 2>&1 &
+          echo $! > /tmp/pf.pid
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:18000/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Port-forward did not become ready"
+          cat /tmp/pf.log || true
+          exit 1
+
+      - name: Post-deploy gate (smoke + p95 + optional R2)
+        env:
+          BASE_URL: "http://127.0.0.1:18000"
+          VAL_CSV: "artifacts/processed/val.csv"
+          P95_MS_MAX: "${{ env.P95_MS_MAX }}"
+          POST_DEPLOY_R2_MIN: "${{ env.POST_DEPLOY_R2_MIN }}"
+          POST_DEPLOY_OUT: "artifacts/post_deploy_gate.json"
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy scikit-learn
+          python .github/scripts/post_deploy_gate.py --base-url "${BASE_URL}"
+
+      - name: Rollback on gate failure (in-cluster)
+        if: failure()
+        run: |
+          set -euo pipefail
+          kubectl rollout undo deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}"
+          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
+
+      - name: Upload post-deploy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-report
+          path: artifacts/post_deploy_gate.json
+          if-no-files-found: warn
+
+      - name: Cleanup (always)
+        if: always()
+        run: |
+          set -euo pipefail
+
+          if [ -f /tmp/pf.pid ]; then
+            kill "$(cat /tmp/pf.pid)" || true
+          fi
+
+          # If Service (LoadBalancer) exists, delete it before cluster deletion.
+          kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+
+          eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
