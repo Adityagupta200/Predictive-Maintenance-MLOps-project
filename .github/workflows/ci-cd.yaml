@@ -301,6 +301,10 @@ jobs:
         with:
           role-to-assume: ${{ secrets.EKS_DEPLOY }}
           aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Get Role Identity
+        run: |
+          aws sts get-caller-identity
 
       - name: Install eksctl
         run: |
