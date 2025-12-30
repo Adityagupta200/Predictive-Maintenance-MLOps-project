@@ -7,7 +7,6 @@ permissions:
 on:
   pull_request:
     branches: [master]
-
   workflow_dispatch:
     inputs:
       run_ephemeral_eks_drill:
@@ -100,104 +99,6 @@ jobs:
           METRICS_PATH: "${{ env.METRICS_PATH }}"
         run: python .github/scripts/check_accuracy_gate.py
 
-  # Keep your existing deploy job intact (no behavior removed/changed).
-  # deploy:
-  #   needs: test-train-validate
-  #   if: needs.test-train-validate.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.runephemeraleksdrill != 'true'
-  #   runs-on: ubuntu-latest
-
-  #   env:
-  #     AWS_REGION: ap-south-1
-  #     EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-  #     IMAGE_TAG: ${{ github.sha }}
-  #     IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
-  #     K8S_NAMESPACE: default
-  #     DEPLOYMENT_NAME: predictive-maintenance-api
-
-  #   defaults:
-  #     run:
-  #       shell: bash
-
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v4
-
-  #     - name: Download model artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: model-artifact
-  #         path: .github_artifacts
-
-  #     - name: Place model into Docker build context
-  #       run: |
-  #         set -euo pipefail
-  #         mkdir -p models
-
-  #         if [ -f .github_artifacts/models/best_model.joblib ]; then
-  #           cp .github_artifacts/models/best_model.joblib models/best_model.joblib
-  #         elif [ -f .github_artifacts/best_model.joblib ]; then
-  #           cp .github_artifacts/best_model.joblib models/best_model.joblib
-  #         else
-  #           echo "Downloaded artifact contents:"
-  #           ls -R .github_artifacts
-  #           exit 1
-  #         fi
-
-  #         test -f models/best_model.joblib
-
-  #     - name: Log in to Docker registry
-  #       uses: docker/login-action@v3
-  #       with:
-  #         username: ${{ secrets.DOCKER_USERNAME }}
-  #         password: ${{ secrets.DOCKER_PASSWORD }}
-
-  #     - name: Build and push image
-  #       id: build
-  #       run: |
-  #         set -euo pipefail
-  #         IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-  #         docker build -f infra/docker/DockerFile -t "$IMAGE" .
-  #         docker push "$IMAGE"
-  #         echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-
-  #     - name: Configure AWS credentials (OIDC)
-  #       uses: aws-actions/configure-aws-credentials@v4
-  #       with:
-  #         role-to-assume: ${{ secrets.EKS_DEPLOY }}
-  #         aws-region: ${{ env.AWS_REGION }}
-
-  #     - name: Install kubectl
-  #       uses: azure/setup-kubectl@v4
-  #       with:
-  #         version: "v1.30.0"
-
-  #     - name: Configure kubectl for EKS
-  #       run: |
-  #         set -euo pipefail
-  #         aws eks update-kubeconfig \
-  #           --name "${EKS_CLUSTER_NAME}" \
-  #           --region "${AWS_REGION}"
-
-  #     - name: Deploy new version to Kubernetes
-  #       run: |
-  #         set -euo pipefail
-  #         IMAGE="${{ steps.build.outputs.image }}"
-  #         kubectl -n "${K8S_NAMESPACE}" set image deployment/${DEPLOYMENT_NAME} \
-  #           api="$IMAGE"
-  #         kubectl -n "${K8S_NAMESPACE}" rollout status \
-  #           deployment/${DEPLOYMENT_NAME} --timeout=600s
-
-  #     - name: Debug rollout failure
-  #       if: failure()
-  #       run: |
-  #         set -euo pipefail
-  #         kubectl -n "${K8S_NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o wide || true
-  #         kubectl -n "${K8S_NAMESPACE}" describe deploy "${DEPLOYMENT_NAME}" || true
-  #         kubectl -n "${K8S_NAMESPACE}" get rs -l app="${DEPLOYMENT_NAME}" -o wide || true
-  #         kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o wide || true
-  #         kubectl -n "${K8S_NAMESPACE}" describe pods -l app="${DEPLOYMENT_NAME}" || true
-  #         kubectl -n "${K8S_NAMESPACE}" logs -l app="${DEPLOYMENT_NAME}" --all-containers=true --tail=200 || true
-
   # Manual ephemeral EKS drill that creates resources and ALWAYS destroys them.
   ephemeral-eks-drill:
     needs: test-train-validate
@@ -216,13 +117,10 @@ jobs:
       AWS_REGION: ap-south-1
       CLUSTER_NAME: pm-${{ github.run_id }}
       K8S_NAMESPACE: default
-
       # Must match infra/k8s/deployment.yaml metadata.name
       DEPLOYMENT_NAME: predictive-maintenance-api
-
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
-
       # PDF targets
       P95_MS_MAX: "200"
       POST_DEPLOY_R2_MIN: "0.90"
@@ -302,7 +200,7 @@ jobs:
           role-to-assume: ${{ secrets.EKS_DEPLOY }}
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
-      
+
       - name: Get Role Identity
         run: |
           aws sts get-caller-identity
@@ -330,9 +228,10 @@ jobs:
           cat /tmp/cluster.yaml
 
       - name: Create ephemeral EKS cluster
+        id: create_cluster
         run: |
           set -euo pipefail
-          eksctl create cluster -f /tmp/cluster.yaml --wait
+          eksctl create cluster -f /tmp/cluster.yaml
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -356,12 +255,14 @@ jobs:
           set -euo pipefail
           kubectl port-forward -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" 18000:8000 > /tmp/pf.log 2>&1 &
           echo $! > /tmp/pf.pid
+
           for i in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:18000/health" >/dev/null; then
               exit 0
             fi
             sleep 2
           done
+
           echo "Port-forward did not become ready"
           cat /tmp/pf.log || true
           exit 1
@@ -380,7 +281,7 @@ jobs:
           python .github/scripts/post_deploy_gate.py --base-url "${BASE_URL}"
 
       - name: Rollback on gate failure (in-cluster)
-        if: failure()
+        if: failure() && steps.create_cluster.outcome == 'success'
         run: |
           set -euo pipefail
           kubectl rollout undo deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}"
@@ -403,8 +304,15 @@ jobs:
             kill "$(cat /tmp/pf.pid)" || true
           fi
 
-          # If Service (LoadBalancer) exists, delete it before cluster deletion.
-          kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
-          kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          # Only try kubectl if kubeconfig exists (cluster actually created).
+          if [ -f "${HOME}/.kube/config" ]; then
+            kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+            kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          fi
 
-          eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
+          # Only delete cluster if it exists.
+          if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+            eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
+          else
+            echo "Cluster ${CLUSTER_NAME} does not exist; skipping eksctl delete."
+          fi
