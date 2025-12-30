@@ -103,7 +103,7 @@ jobs:
   # Keep your existing deploy job intact (no behavior removed/changed).
   deploy:
     needs: test-train-validate
-    if: needs.test-train-validate.result == 'success'
+    if: needs.test-train-validate.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.runephemeraleksdrill != 'true'
     runs-on: ubuntu-latest
 
     env:
