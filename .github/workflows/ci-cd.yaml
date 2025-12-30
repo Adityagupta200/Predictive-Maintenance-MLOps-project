@@ -301,6 +301,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.EKS_DEPLOY }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
       
       - name: Get Role Identity
         run: |
