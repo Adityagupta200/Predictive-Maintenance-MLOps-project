@@ -15,7 +15,9 @@ on:
         required: true
         default: "false"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "true"
+          - "false"
 
 env:
   PYTHON_VERSION: "3.11"
