@@ -249,7 +249,7 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: Deploy (ephemeral drill: Deployment only)
+      - name: "Deploy (ephemeral drill: Deployment only)"
         run: |
           set -euo pipefail
           kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
@@ -260,6 +260,7 @@ jobs:
         id: port_forward
         run: |
           set -euo pipefail
+
           kubectl port-forward -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" 18000:8000 > /tmp/pf.log 2>&1 &
           echo $! > /tmp/pf.pid
 
@@ -280,10 +281,6 @@ jobs:
 
           exit 1
 
-      # Production-grade fix:
-      # Build a schema-aligned numeric CSV from the deployed API's OpenAPI schema.
-      # If val.csv cannot be aligned (non-numeric like FD001), fall back to a synthetic numeric row
-      # so smoke + latency testing still runs, and avoid R2 (drop RUL) in fallback mode.
       - name: Build schema-aligned val.csv for API
         if: steps.port_forward.outcome == 'success'
         run: |
@@ -292,7 +289,6 @@ jobs:
           pip install requests pandas numpy
 
           python - <<'PY'
-          import json
           import os
           from pathlib import Path
 
@@ -303,17 +299,13 @@ jobs:
           base = os.environ["BASE_URL"].rstrip("/")
           src_csv = Path(os.environ["VAL_CSV"])
           out_csv = Path(os.environ["VAL_CSV_ALIGNED"])
-
           out_csv.parent.mkdir(parents=True, exist_ok=True)
 
           openapi = requests.get(f"{base}/openapi.json", timeout=20).json()
-
-          # Locate request schema for POST /predict
           post = openapi["paths"]["/predict"]["post"]
           req_schema = post["requestBody"]["content"]["application/json"]["schema"]
 
           def deref(ref: str):
-            # ref like "#/components/schemas/SomeModel"
             _, _, path = ref.partition("#/")
             cur = openapi
             for part in path.split("/"):
@@ -323,7 +315,6 @@ jobs:
           if "$ref" in req_schema:
             req_schema = deref(req_schema["$ref"])
 
-          # Typical structure: { "properties": { "features": { "$ref": ... } } }
           features_schema = req_schema.get("properties", {}).get("features", {})
           if "$ref" in features_schema:
             features_schema = deref(features_schema["$ref"])
@@ -337,24 +328,21 @@ jobs:
           df = pd.read_csv(src_csv)
           has_rul = "RUL" in df.columns
 
-          # Reindex to expected features (missing columns become NaN)
           X = df.reindex(columns=required_features)
-
-          # Coerce everything to numeric; non-numeric (e.g., FD001) becomes NaN
           X = X.apply(pd.to_numeric, errors="coerce")
 
-          # Keep only fully-valid rows for best realism
           mask = X.notna().all(axis=1)
           X_valid = X.loc[mask].copy()
 
           if len(X_valid) == 0:
-            # Fallback: still test production endpoint with a valid numeric payload
-            # (and skip R2 by dropping labels)
             X_valid = pd.DataFrame([np.zeros(len(required_features), dtype=float)], columns=required_features)
             has_rul = False
 
           if has_rul:
-            out = pd.concat([X_valid.reset_index(drop=True), df.loc[X_valid.index, ["RUL"]].reset_index(drop=True)], axis=1)
+            out = pd.concat(
+              [X_valid.reset_index(drop=True), df.loc[X_valid.index, ["RUL"]].reset_index(drop=True)],
+              axis=1,
+            )
           else:
             out = X_valid.reset_index(drop=True)
 
@@ -365,7 +353,6 @@ jobs:
       - name: Post-deploy gate (smoke + p95 + optional R2)
         if: steps.port_forward.outcome == 'success'
         env:
-          # post_deploy_gate.py reads these env vars by default
           BASE_URL: "${{ env.BASE_URL }}"
           VAL_CSV: "${{ env.VAL_CSV_ALIGNED }}"
           P95_MS_MAX: "${{ env.P95_MS_MAX }}"
@@ -402,13 +389,11 @@ jobs:
             kill "$(cat /tmp/pf.pid)" || true
           fi
 
-          # Only try kubectl cleanup if kubeconfig exists
           if [ -f "${HOME}/.kube/config" ]; then
             kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
             kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
           fi
 
-          # Always try to delete the cluster if it exists (ensures cloud resources are destroyed)
           if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
             eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
           else
