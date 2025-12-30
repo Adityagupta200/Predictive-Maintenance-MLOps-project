@@ -301,53 +301,80 @@ jobs:
           out_csv = Path(os.environ["VAL_CSV_ALIGNED"])
           out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-          openapi = requests.get(f"{base}/openapi.json", timeout=20).json()
-          post = openapi["paths"]["/predict"]["post"]
-          req_schema = post["requestBody"]["content"]["application/json"]["schema"]
-
-          def deref(ref: str):
-            _, _, path = ref.partition("#/")
-            cur = openapi
-            for part in path.split("/"):
-              cur = cur[part]
-            return cur
-
-          if "$ref" in req_schema:
-            req_schema = deref(req_schema["$ref"])
-
-          features_schema = req_schema.get("properties", {}).get("features", {})
-          if "$ref" in features_schema:
-            features_schema = deref(features_schema["$ref"])
-
-          feature_props = features_schema.get("properties", {})
-          if not feature_props:
-            raise SystemExit("Could not infer feature names from /openapi.json. Ensure /predict uses a typed model for features.")
-
-          required_features = list(feature_props.keys())
-
+          # Load val.csv
           df = pd.read_csv(src_csv)
-          has_rul = "RUL" in df.columns
 
-          X = df.reindex(columns=required_features)
+          def try_infer_required_features_from_openapi():
+            try:
+              openapi = requests.get(f"{base}/openapi.json", timeout=20).json()
+
+              def deref(ref: str):
+                _, _, path = ref.partition("#/")
+                cur = openapi
+                for part in path.split("/"):
+                  cur = cur[part]
+                return cur
+
+              # POST /predict request schema
+              post = openapi["paths"]["/predict"]["post"]
+              req_schema = post["requestBody"]["content"]["application/json"]["schema"]
+              if "$ref" in req_schema:
+                req_schema = deref(req_schema["$ref"])
+
+              # features schema (may be a $ref or may be additionalProperties)
+              features_schema = req_schema.get("properties", {}).get("features", {})
+              if "$ref" in features_schema:
+                features_schema = deref(features_schema["$ref"])
+
+              feature_props = features_schema.get("properties", {}) or {}
+              if feature_props:
+                return list(feature_props.keys())
+
+              # If it's Dict[str, float], OpenAPI commonly uses additionalProperties (no explicit keys)
+              return None
+            except Exception as e:
+              print(f"OpenAPI inference skipped: {e}")
+              return None
+
+          required_features = try_infer_required_features_from_openapi()
+
+          # Build features frame
+          if required_features:
+            X = df.reindex(columns=required_features)
+            print(f"Using OpenAPI-inferred features (count={len(required_features)}).")
+          else:
+            # Fallback: take everything except label, then force numeric
+            X = df.drop(columns=["RUL"], errors="ignore")
+            print(f"Using fallback features from val.csv columns (count={X.shape[1]}).")
+
+          # Force numeric; drop non-numeric columns (all-NaN after coercion)
           X = X.apply(pd.to_numeric, errors="coerce")
+          X = X.dropna(axis=1, how="all")
 
-          mask = X.notna().all(axis=1)
-          X_valid = X.loc[mask].copy()
+          if X.shape[1] == 0:
+            raise SystemExit("val.csv has no numeric feature columns after cleaning; cannot run production post-deploy gate.")
+
+          # Prefer rows with no NaNs across chosen features
+          X_valid = X.dropna(axis=0, how="any")
+          keep_rul = "RUL" in df.columns
 
           if len(X_valid) == 0:
-            X_valid = pd.DataFrame([np.zeros(len(required_features), dtype=float)], columns=required_features)
-            has_rul = False
+            # Hard fallback: still test the service with a valid numeric payload
+            X_valid = X.fillna(0.0).head(1)
+            keep_rul = False
 
-          if has_rul:
-            out = pd.concat(
-              [X_valid.reset_index(drop=True), df.loc[X_valid.index, ["RUL"]].reset_index(drop=True)],
-              axis=1,
-            )
-          else:
+          # Attach labels only if we kept real rows and labels are numeric
+          if keep_rul:
+            y = pd.to_numeric(df.loc[X_valid.index, "RUL"], errors="coerce")
+            if y.isna().any():
+              keep_rul = False
+            else:
+              out = pd.concat([X_valid.reset_index(drop=True), y.reset_index(drop=True).rename("RUL")], axis=1)
+          if not keep_rul:
             out = X_valid.reset_index(drop=True)
 
           out.to_csv(out_csv, index=False)
-          print(f"Wrote schema-aligned CSV: {out_csv} (rows={len(out)})")
+          print(f"Wrote aligned CSV: {out_csv} rows={len(out)} cols={len(out.columns)} keep_rul={keep_rul}")
           PY
 
       - name: Post-deploy gate (smoke + p95 + optional R2)
