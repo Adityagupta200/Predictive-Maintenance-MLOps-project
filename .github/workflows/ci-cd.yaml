@@ -323,7 +323,6 @@ jobs:
 
           echo "Port-forward did not become ready"
           cat /tmp/pf.log || true
-
           echo "Debug pods:"
           kubectl -n "${K8S_NAMESPACE}" get pods -o wide || true
           kubectl -n "${K8S_NAMESPACE}" describe pods || true
@@ -335,7 +334,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pandas numpy scikit-learn joblib
+
+          # FIX: install pinned runtime deps so joblib can load XGBoost-based models.
+          pip install -r requirements-api.txt joblib
 
           python - <<'PY'
           import os
@@ -456,7 +457,10 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install requests pandas numpy scikit-learn
+
+          # Recommended: keep runtime libs aligned with your API pins + add requests.
+          pip install -r requirements-api.txt requests
+
           python .github/scripts/post_deploy_gate.py --base-url "${BASE_URL}" --val-csv "${VAL_CSV}"
 
       - name: Rollback on gate failure (in-cluster)
@@ -487,7 +491,6 @@ jobs:
         if: success() || env.DESTROY_ON_FAILURE == 'true'
         run: |
           set -euo pipefail
-
           if [ -f "${HOME}/.kube/config" ]; then
             kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
             kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
