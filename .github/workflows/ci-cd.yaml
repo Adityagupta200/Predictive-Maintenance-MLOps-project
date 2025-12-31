@@ -301,7 +301,7 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: Deploy (ephemeral drill: Deployment only)
+      - name: "Deploy (ephemeral drill: Deployment only)"
         run: |
           set -euo pipefail
           kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
