@@ -258,12 +258,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gettext-base
 
-      - name: Check if EKS cluster exists (reuse)
-        id: check_cluster
+      # ---------- FIX: preflight CloudFormation stacks to avoid AlreadyExistsException ----------
+      - name: Check EKS cluster + eksctl CloudFormation stacks (reuse)
+        id: preflight
         run: |
           set -euo pipefail
+
+          CLUSTER_EXISTS=false
           if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            CLUSTER_EXISTS=true
             status="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.status' --output text)"
             echo "Cluster exists. status=${status}"
             if [ "${status}" != "ACTIVE" ]; then
@@ -271,12 +274,58 @@ jobs:
               aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
             fi
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Cluster does not exist; will create."
+            echo "Cluster does not exist."
           fi
 
+          # Any eksctl-managed stack has prefix: eksctl-<clustername>-
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -n "${STACKS}" ] && [ "${STACKS}" != "None" ]; then
+            echo "Found eksctl CloudFormation stacks:"
+            echo "${STACKS}"
+            STACK_EXISTS=true
+          else
+            STACK_EXISTS=false
+          fi
+
+          echo "cluster_exists=${CLUSTER_EXISTS}" >> "$GITHUB_OUTPUT"
+          echo "stack_exists=${STACK_EXISTS}" >> "$GITHUB_OUTPUT"
+
+      - name: Cleanup orphan eksctl CloudFormation stacks (only if cluster missing)
+        if: steps.preflight.outputs.cluster_exists != 'true' && steps.preflight.outputs.stack_exists == 'true'
+        run: |
+          set -euo pipefail
+          echo "Cluster is missing but eksctl stacks exist. Cleaning orphan stacks to unblock create..."
+
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -z "${STACKS}" ] || [ "${STACKS}" = "None" ]; then
+            echo "No stacks to delete."
+            exit 0
+          fi
+
+          # Delete nodegroup stacks first, then cluster stack (reverse-sort usually helps)
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Deleting stack: ${s}"
+            aws cloudformation delete-stack --stack-name "${s}" || true
+          done
+
+          # Wait (best-effort) for deletion
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Waiting for delete-complete: ${s}"
+            aws cloudformation wait stack-delete-complete --stack-name "${s}" || true
+          done
+
+          echo "Orphan stack cleanup complete."
+
       - name: Render eksctl cluster config (create only)
-        if: steps.check_cluster.outputs.exists != 'true'
+        if: steps.preflight.outputs.cluster_exists != 'true'
         run: |
           set -euo pipefail
           export CLUSTER_NAME AWS_REGION
@@ -285,7 +334,7 @@ jobs:
           cat /tmp/cluster.yaml
 
       - name: Create EKS cluster (only if missing)
-        if: steps.check_cluster.outputs.exists != 'true'
+        if: steps.preflight.outputs.cluster_exists != 'true'
         run: |
           set -euo pipefail
           eksctl create cluster -f /tmp/cluster.yaml
@@ -368,7 +417,7 @@ jobs:
 
           if target_col in df.columns:
             y = pd.to_numeric(df[target_col], errors="coerce")
-            out = pd.concat([X, y.rename("RUL")], axis=1)  # normalize to RUL if present
+            out = pd.concat([X, y.rename("RUL")], axis=1)
           else:
             out = X
 
@@ -437,15 +486,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Delete any Services first (prevents orphaned cloud LBs if any exist)
+          # Delete Services first (prevents orphaned cloud LBs if any exist)
           kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
 
           if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
             eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
+            exit 0
+          fi
+
+          # If no cluster exists, still clean up orphan eksctl stacks (best-effort)
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -n "${STACKS}" ] && [ "${STACKS}" != "None" ]; then
+            for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+              echo "Deleting orphan stack: ${s}"
+              aws cloudformation delete-stack --stack-name "${s}" || true
+              aws cloudformation wait stack-delete-complete --stack-name "${s}" || true
+            done
           else
-            echo "Cluster ${CLUSTER_NAME} does not exist; skipping eksctl delete."
+            echo "No cluster and no stacks found. Nothing to delete."
           fi
 
       - name: Keep cluster for debugging/reuse (failure)
