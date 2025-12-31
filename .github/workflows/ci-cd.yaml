@@ -135,14 +135,18 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
 
+      # Gate thresholds
       P95_MS_MAX: "200"
       POST_DEPLOY_R2_MIN: "0.90"
 
-      BASE_URL: "http://127.0.0.1:18000"
+      # Gate files
       VAL_CSV: "artifacts/processed/val.csv"
       VAL_CSV_ALIGNED: "artifacts/processed/val_for_api.csv"
       POST_DEPLOY_OUT: "artifacts/post_deploy_gate.json"
       N_REQUESTS: "50"
+
+      # In-cluster gate base URL (ClusterIP service created by this workflow)
+      IN_CLUSTER_BASE_URL: "http://predictive-maintenance-svc:8000"
 
       DESTROY_ON_FAILURE: ${{ inputs.destroy_on_failure }}
 
@@ -159,16 +163,13 @@ jobs:
         run: |
           set -euo pipefail
           raw="${CLUSTER_NAME}"
-          # normalize: lower-case, replace '/' and '_' with '-', keep only [a-z0-9-]
           name="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr '/_' '--' | tr -cd 'a-z0-9-')"
-          # EKS names should be non-empty and generally safer starting with a letter
           if [ -z "$name" ]; then
             name="pm-debug"
           fi
           if ! echo "$name" | grep -Eq '^[a-z]'; then
             name="pm-${name}"
           fi
-          # avoid extreme lengths (EKS allows long names, but keep reasonable)
           name="${name:0:80}"
           echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"
           echo "cluster_name=$name" >> "$GITHUB_OUTPUT"
@@ -300,42 +301,43 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: "Deploy (ephemeral drill: Deployment only)"
+      - name: Deploy (ephemeral drill: Deployment only)
         run: |
           set -euo pipefail
           kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
           kubectl set image deployment/"${DEPLOYMENT_NAME}" api="${{ steps.build.outputs.image }}" -n "${K8S_NAMESPACE}"
           kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
 
-      - name: Port-forward API
-        id: port_forward
+      - name: Create/Update ClusterIP service for in-cluster testing
         run: |
           set -euo pipefail
-          kubectl port-forward -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" 18000:8000 > /tmp/pf.log 2>&1 &
-          echo $! > /tmp/pf.pid
+          cat <<'YAML' | kubectl apply -n "${K8S_NAMESPACE}" -f -
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: predictive-maintenance-svc
+          spec:
+            type: ClusterIP
+            selector:
+              app: predictive-maintenance-api
+            ports:
+              - name: http
+                protocol: TCP
+                port: 8000
+                targetPort: 8000
+          YAML
 
-          for i in $(seq 1 60); do
-            if curl -fsS "${BASE_URL}/health" >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-
-          echo "Port-forward did not become ready"
-          cat /tmp/pf.log || true
-          echo "Debug pods:"
-          kubectl -n "${K8S_NAMESPACE}" get pods -o wide || true
-          kubectl -n "${K8S_NAMESPACE}" describe pods || true
-          kubectl -n "${K8S_NAMESPACE}" logs -l app="${DEPLOYMENT_NAME}" --all-containers=true --tail=200 || true
-          exit 1
+      - name: Wait for API pods ready
+        run: |
+          set -euo pipefail
+          kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod -l app="${DEPLOYMENT_NAME}" --timeout=300s
+          kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o wide
 
       - name: Build model-aligned val.csv for API (fix feature-count mismatch)
-        if: steps.port_forward.outcome == 'success'
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-
-          # FIX: install pinned runtime deps so joblib can load XGBoost-based models.
+          # install pinned API/runtime deps so joblib can load XGBoost-based models reliably
           pip install -r requirements-api.txt joblib
 
           python - <<'PY'
@@ -445,23 +447,52 @@ jobs:
           print(f"Wrote {out_csv} with cols={len(out.columns)} (features={n_features}, keep_rul={keep_rul})")
           PY
 
-      - name: Post-deploy gate (smoke + p95 + optional R2)
-        if: steps.port_forward.outcome == 'success'
-        env:
-          BASE_URL: "${{ env.BASE_URL }}"
-          VAL_CSV: "${{ env.VAL_CSV_ALIGNED }}"
-          P95_MS_MAX: "${{ env.P95_MS_MAX }}"
-          POST_DEPLOY_R2_MIN: "${{ env.POST_DEPLOY_R2_MIN }}"
-          POST_DEPLOY_OUT: "${{ env.POST_DEPLOY_OUT }}"
-          N_REQUESTS: "${{ env.N_REQUESTS }}"
+      - name: Post-deploy gate (in-cluster: smoke + p95 + optional R2)
+        id: post_deploy_gate
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
 
-          # Recommended: keep runtime libs aligned with your API pins + add requests.
-          pip install -r requirements-api.txt requests
+          # Ensure clean reruns on reused cluster
+          kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
 
-          python .github/scripts/post_deploy_gate.py --base-url "${BASE_URL}" --val-csv "${VAL_CSV}"
+          # Create a short-lived pod to run the gate from inside the cluster network
+          kubectl run post-deploy-gate \
+            -n "${K8S_NAMESPACE}" \
+            --image=python:3.11-slim \
+            --restart=Never \
+            --command -- sleep 3600
+
+          kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod/post-deploy-gate --timeout=180s
+
+          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "mkdir -p /work/.github/scripts /work/artifacts/processed"
+
+          # Copy pinned deps + gate script + aligned val csv into the pod
+          kubectl cp requirements-api.txt "${K8S_NAMESPACE}/post-deploy-gate:/work/requirements-api.txt"
+          kubectl cp .github/scripts/post_deploy_gate.py "${K8S_NAMESPACE}/post-deploy-gate:/work/.github/scripts/post_deploy_gate.py"
+          kubectl cp "${VAL_CSV_ALIGNED}" "${K8S_NAMESPACE}/post-deploy-gate:/work/artifacts/processed/val_for_api.csv"
+
+          # Install deps inside the pod and run the gate
+          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "python -m pip install --upgrade pip && pip install -r /work/requirements-api.txt requests"
+
+          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "\
+            python /work/.github/scripts/post_deploy_gate.py \
+              --base-url '${IN_CLUSTER_BASE_URL}' \
+              --val-csv /work/artifacts/processed/val_for_api.csv \
+              --n-requests '${N_REQUESTS}' \
+              --p95-ms-max '${P95_MS_MAX}' \
+              --r2-min '${POST_DEPLOY_R2_MIN}' \
+              --out /work/post_deploy_gate.json \
+          "
+
+          # Copy report back to runner for artifact upload
+          mkdir -p artifacts
+          kubectl cp "${K8S_NAMESPACE}/post-deploy-gate:/work/post_deploy_gate.json" "${POST_DEPLOY_OUT}"
+
+      - name: Cleanup gate pod (always)
+        if: always()
+        run: |
+          set -euo pipefail
+          kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
 
       - name: Rollback on gate failure (in-cluster)
         if: failure() && steps.kubeconfig.outcome == 'success'
@@ -479,20 +510,14 @@ jobs:
           path: artifacts/post_deploy_gate.json
           if-no-files-found: warn
 
-      - name: Stop port-forward (always)
-        if: always()
-        run: |
-          set -euo pipefail
-          if [ -f /tmp/pf.pid ]; then
-            kill "$(cat /tmp/pf.pid)" || true
-          fi
-
       - name: Destroy EKS resources (success or override)
         if: success() || env.DESTROY_ON_FAILURE == 'true'
         run: |
           set -euo pipefail
+
+          # Delete in-cluster test service (safe even if missing)
           if [ -f "${HOME}/.kube/config" ]; then
-            kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+            kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
             kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
           fi
 
