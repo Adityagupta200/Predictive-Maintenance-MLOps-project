@@ -447,7 +447,7 @@ jobs:
           print(f"Wrote {out_csv} with cols={len(out.columns)} (features={n_features}, keep_rul={keep_rul})")
           PY
 
-      - name: Post-deploy gate (in-cluster: smoke + p95 + optional R2)
+      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)"
         id: post_deploy_gate
         run: |
           set -euo pipefail
