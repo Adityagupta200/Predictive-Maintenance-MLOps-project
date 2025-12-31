@@ -1,3 +1,4 @@
+# src/api/main.py
 import os
 import time
 from pathlib import Path
@@ -9,12 +10,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
 from .model_loader import load_model
-from .schemas import PredictionRequest, PredictionResponse, BatchPredictionResponse
-from .observability import (
-    RequestContextMiddleware,
-    audit_prediction_event,
-    setup_logging,
-)
+from .observability import RequestContextMiddleware, audit_prediction_event, setup_logging
+from .schemas import BatchPredictionResponse, PredictionRequest, PredictionResponse
 
 setup_logging()
 
@@ -45,25 +42,32 @@ def predict_single(payload: PredictionRequest, request: Request):
         raise HTTPException(status_code=500, detail="Model not loaded")
 
     df = pd.DataFrame([payload.features])
-
     start = time.perf_counter()
+
     try:
         y_pred = model.predict(df)
         pred_value = float(y_pred[0])
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    finally:
         latency_ms = (time.perf_counter() - start) * 1000.0
 
-    audit_prediction_event(
-        request_id=getattr(request.state, "request_id", "unknown"),
-        model_version=MODEL_VERSION,
-        latency_ms=latency_ms,
-        inputs=payload.features,
-        output={"prediction": pred_value},
-    )
+        audit_prediction_event(
+            request_id=getattr(request.state, "request_id", "unknown"),
+            model_version=MODEL_VERSION,
+            latency_ms=latency_ms,
+            inputs=payload.features,
+            output={"prediction": pred_value},
+        )
+        return PredictionResponse(prediction=pred_value)
 
-    return PredictionResponse(prediction=pred_value)
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        audit_prediction_event(
+            request_id=getattr(request.state, "request_id", "unknown"),
+            model_version=MODEL_VERSION,
+            latency_ms=latency_ms,
+            inputs=payload.features,
+            output={"error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/predict/batch", response_model=BatchPredictionResponse)
@@ -72,22 +76,29 @@ def predict_batch(payloads: List[PredictionRequest], request: Request):
         raise HTTPException(status_code=500, detail="Model not loaded")
 
     df = pd.DataFrame([p.features for p in payloads])
-
     start = time.perf_counter()
+
     try:
         y_pred = model.predict(df)
         pred_list = [float(v) for v in y_pred]
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    finally:
         latency_ms = (time.perf_counter() - start) * 1000.0
 
-    audit_prediction_event(
-        request_id=getattr(request.state, "request_id", "unknown"),
-        model_version=MODEL_VERSION,
-        latency_ms=latency_ms,
-        inputs={"batch_size": len(payloads)},
-        output={"predictions_count": len(pred_list)},
-    )
+        audit_prediction_event(
+            request_id=getattr(request.state, "request_id", "unknown"),
+            model_version=MODEL_VERSION,
+            latency_ms=latency_ms,
+            inputs={"batch_size": len(payloads)},
+            output={"predictions_count": len(pred_list)},
+        )
+        return BatchPredictionResponse(predictions=pred_list)
 
-    return BatchPredictionResponse(predictions=pred_list)
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        audit_prediction_event(
+            request_id=getattr(request.state, "request_id", "unknown"),
+            model_version=MODEL_VERSION,
+            latency_ms=latency_ms,
+            inputs={"batch_size": len(payloads)},
+            output={"error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc))

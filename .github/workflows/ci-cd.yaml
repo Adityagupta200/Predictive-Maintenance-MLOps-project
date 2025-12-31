@@ -7,6 +7,7 @@ permissions:
 on:
   pull_request:
     branches: [master]
+
   workflow_dispatch:
     inputs:
       run_ephemeral_eks_drill:
@@ -14,19 +15,15 @@ on:
         required: true
         default: "false"
         type: choice
-        options:
-          - "true"
-          - "false"
+        options: ["true", "false"]
+
       destroy_on_failure:
         description: "If true, destroys EKS even when the drill fails. Default keeps cluster for debugging/reuse."
         required: true
         default: "false"
         type: choice
-        options:
-          - "true"
-          - "false"
+        options: ["true", "false"]
 
-# Prevent two runs from fighting over the same reused debug cluster on the same branch.
 concurrency:
   group: pm-eks-debug-${{ github.ref }}
   cancel-in-progress: false
@@ -34,7 +31,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
 
-  # MLflow & gating defaults (point 1 in PDF)
+  # ML gate configuration
   MLFLOW_TRACKING_URI: "file:./mlruns"
   MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
   METRIC_NAME: "r2"
@@ -60,6 +57,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           if [ -f requirements-api.txt ]; then pip install -r requirements-api.txt; fi
@@ -67,13 +65,6 @@ jobs:
 
       - name: Add src to PYTHONPATH
         run: echo "PYTHONPATH=$PWD/src" >> "$GITHUB_ENV"
-
-      - name: Debug repo tree
-        run: |
-          pwd
-          ls -la
-          ls -la src || true
-          ls -la src/api || true
 
       - name: Run unit tests (PyTest)
         run: pytest -q
@@ -83,6 +74,7 @@ jobs:
 
       - name: Verify model artifact exists
         run: |
+          set -euo pipefail
           ls -la models || true
           test -f models/best_model.joblib
 
@@ -93,11 +85,13 @@ jobs:
           path: models/best_model.joblib
           if-no-files-found: error
 
-      - name: Upload validation data for post-deploy checks
+      - name: Upload validation data + feature metadata for post-deploy checks
         uses: actions/upload-artifact@v4
         with:
           name: post-deploy-data
-          path: artifacts/processed/val.csv
+          path: |
+            artifacts/processed/val.csv
+            artifacts/processed/meta_features.json
           if-no-files-found: error
 
       - name: Enforce quality gate
@@ -116,6 +110,7 @@ jobs:
       needs.test-train-validate.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_ephemeral_eks_drill == 'true'
+
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -125,13 +120,11 @@ jobs:
 
     env:
       AWS_REGION: ap-south-1
-
-      # Stable cluster naming for reuse across reruns (branch-scoped).
-      # Will be normalized in a step to remove illegal chars.
       CLUSTER_NAME: pm-debug-${{ github.repository_id }}-${{ github.ref_name }}
 
       K8S_NAMESPACE: default
       DEPLOYMENT_NAME: predictive-maintenance-api
+
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
 
@@ -141,11 +134,12 @@ jobs:
 
       # Gate files
       VAL_CSV: "artifacts/processed/val.csv"
+      META_FEATURES: "artifacts/processed/meta_features.json"
       VAL_CSV_ALIGNED: "artifacts/processed/val_for_api.csv"
       POST_DEPLOY_OUT: "artifacts/post_deploy_gate.json"
       N_REQUESTS: "50"
 
-      # In-cluster gate base URL (ClusterIP service created by this workflow)
+      # In-cluster gate URL
       IN_CLUSTER_BASE_URL: "http://predictive-maintenance-svc:8000"
 
       DESTROY_ON_FAILURE: ${{ inputs.destroy_on_failure }}
@@ -164,12 +158,8 @@ jobs:
           set -euo pipefail
           raw="${CLUSTER_NAME}"
           name="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr '/_' '--' | tr -cd 'a-z0-9-')"
-          if [ -z "$name" ]; then
-            name="pm-debug"
-          fi
-          if ! echo "$name" | grep -Eq '^[a-z]'; then
-            name="pm-${name}"
-          fi
+          if [ -z "$name" ]; then name="pm-debug"; fi
+          if ! echo "$name" | grep -Eq '^[a-z]'; then name="pm-${name}"; fi
           name="${name:0:80}"
           echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"
           echo "cluster_name=$name" >> "$GITHUB_OUTPUT"
@@ -186,21 +176,21 @@ jobs:
           name: model-artifact
           path: .github_artifacts
 
-      - name: Download validation data (val.csv)
+      - name: Download post-deploy artifacts (val.csv + meta_features.json)
         uses: actions/download-artifact@v4
         with:
           name: post-deploy-data
           path: .post_deploy_artifacts
 
-      - name: Place model + val.csv into build/test context
+      - name: Place model + val.csv + meta into build/test context
         run: |
           set -euo pipefail
           mkdir -p models artifacts/processed
 
-          if [ -f .github_artifacts/models/best_model.joblib ]; then
-            cp .github_artifacts/models/best_model.joblib models/best_model.joblib
-          elif [ -f .github_artifacts/best_model.joblib ]; then
+          if [ -f .github_artifacts/best_model.joblib ]; then
             cp .github_artifacts/best_model.joblib models/best_model.joblib
+          elif [ -f .github_artifacts/models/best_model.joblib ]; then
+            cp .github_artifacts/models/best_model.joblib models/best_model.joblib
           else
             echo "Downloaded model artifact contents:"
             ls -R .github_artifacts
@@ -218,6 +208,17 @@ jobs:
             exit 1
           fi
           test -f artifacts/processed/val.csv
+
+          if [ -f .post_deploy_artifacts/meta_features.json ]; then
+            cp .post_deploy_artifacts/meta_features.json artifacts/processed/meta_features.json
+          elif [ -f .post_deploy_artifacts/artifacts/processed/meta_features.json ]; then
+            cp .post_deploy_artifacts/artifacts/processed/meta_features.json artifacts/processed/meta_features.json
+          else
+            echo "Missing meta_features.json in downloaded artifacts:"
+            ls -R .post_deploy_artifacts
+            exit 1
+          fi
+          test -f artifacts/processed/meta_features.json
 
       - name: Log in to Docker registry
         uses: docker/login-action@v3
@@ -284,7 +285,6 @@ jobs:
           cat /tmp/cluster.yaml
 
       - name: Create EKS cluster (only if missing)
-        id: create_cluster
         if: steps.check_cluster.outputs.exists != 'true'
         run: |
           set -euo pipefail
@@ -301,7 +301,7 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: "Deploy (ephemeral drill: Deployment only)"
+      - name: Deploy (ephemeral drill: Deployment only)
         run: |
           set -euo pipefail
           kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
@@ -333,129 +333,55 @@ jobs:
           kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod -l app="${DEPLOYMENT_NAME}" --timeout=300s
           kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o wide
 
-      - name: Build model-aligned val.csv for API (fix feature-count mismatch)
+      - name: Build model-aligned val.csv for API (use meta_features.json)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          # install pinned API/runtime deps so joblib can load XGBoost-based models reliably
-          pip install -r requirements-api.txt joblib
+          pip install -r requirements-api.txt
 
           python - <<'PY'
+          import json
           import os
           from pathlib import Path
-
-          import numpy as np
           import pandas as pd
-          import joblib
 
           src_csv = Path(os.environ["VAL_CSV"])
+          meta_path = Path(os.environ["META_FEATURES"])
           out_csv = Path(os.environ["VAL_CSV_ALIGNED"])
-          model_path = Path("models/best_model.joblib")
           out_csv.parent.mkdir(parents=True, exist_ok=True)
 
           df = pd.read_csv(src_csv)
-          model = joblib.load(model_path)
+          meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
-          def find_attr(obj, attr, visited=None, depth=0, max_depth=6):
-            if visited is None:
-              visited = set()
-            oid = id(obj)
-            if oid in visited:
-              return None
-            visited.add(oid)
+          feature_cols = meta.get("feature_cols") or meta.get("featurecols")
+          target_col = meta.get("target_col") or meta.get("targetcol") or "RUL"
 
-            if hasattr(obj, attr):
-              val = getattr(obj, attr)
-              if val is not None:
-                return val
+          if not feature_cols:
+            raise SystemExit("meta_features.json missing feature_cols/featurecols")
 
-            if depth >= max_depth:
-              return None
+          missing = [c for c in feature_cols if c not in df.columns]
+          if missing:
+            raise SystemExit(f"val.csv missing feature columns: {missing}")
 
-            if hasattr(obj, "named_steps"):
-              for step in obj.named_steps.values():
-                v = find_attr(step, attr, visited, depth + 1, max_depth)
-                if v is not None:
-                  return v
+          X = df[feature_cols].copy()
+          X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-            if hasattr(obj, "steps"):
-              try:
-                for _, step in obj.steps:
-                  v = find_attr(step, attr, visited, depth + 1, max_depth)
-                  if v is not None:
-                    return v
-              except Exception:
-                pass
-
-            for child_name in ("best_estimator_", "estimator", "regressor", "classifier", "model"):
-              if hasattr(obj, child_name):
-                v = find_attr(getattr(obj, child_name), attr, visited, depth + 1, max_depth)
-                if v is not None:
-                  return v
-
-            return None
-
-          feature_names = find_attr(model, "feature_names_in_")
-          n_features = find_attr(model, "n_features_in_")
-
-          if feature_names is not None:
-            feature_names = list(feature_names)
-            n_features = len(feature_names)
-
-          X0 = df.drop(columns=["RUL"], errors="ignore")
-          drop_like = [c for c in X0.columns if str(c).lower().startswith("unnamed")]
-          if drop_like:
-            X0 = X0.drop(columns=drop_like, errors="ignore")
-
-          X0 = X0.apply(pd.to_numeric, errors="coerce")
-          X0 = X0.dropna(axis=1, how="all")
-
-          if n_features is None:
-            raise SystemExit(
-              "Could not infer n_features from model artifact. "
-              "Ensure the saved model exposes n_features_in_ or feature_names_in_."
-            )
-
-          if feature_names is not None:
-            X = df.reindex(columns=feature_names).apply(pd.to_numeric, errors="coerce")
+          if target_col in df.columns:
+            y = pd.to_numeric(df[target_col], errors="coerce")
+            out = pd.concat([X, y.rename("RUL")], axis=1)  # normalize to RUL if present
           else:
-            X = X0.copy()
-            if X.shape[1] > n_features:
-              X = X.iloc[:, :n_features]
-            elif X.shape[1] < n_features:
-              for i in range(n_features - X.shape[1]):
-                X[f"_pad_{i}"] = 0.0
-
-          X_valid = X.dropna(axis=0, how="any")
-          keep_rul = "RUL" in df.columns
-
-          if len(X_valid) == 0:
-            X_valid = X.fillna(0.0).head(1)
-            keep_rul = False
-
-          if keep_rul:
-            y = pd.to_numeric(df.loc[X_valid.index, "RUL"], errors="coerce")
-            if y.isna().any():
-              keep_rul = False
-
-          if keep_rul:
-            out = pd.concat([X_valid.reset_index(drop=True), y.reset_index(drop=True).rename("RUL")], axis=1)
-          else:
-            out = X_valid.reset_index(drop=True)
+            out = X
 
           out.to_csv(out_csv, index=False)
-          print(f"Wrote {out_csv} with cols={len(out.columns)} (features={n_features}, keep_rul={keep_rul})")
+          print(f"Wrote {out_csv} with features={len(feature_cols)}, has_target={'RUL' in out.columns}")
           PY
 
-      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)"
+      - name: Post-deploy gate (in-cluster: smoke + p95 + optional R2)
         id: post_deploy_gate
         run: |
           set -euo pipefail
 
-          # Ensure clean reruns on reused cluster
           kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
-
-          # Create a short-lived pod to run the gate from inside the cluster network
           kubectl run post-deploy-gate \
             -n "${K8S_NAMESPACE}" \
             --image=python:3.11-slim \
@@ -463,15 +389,12 @@ jobs:
             --command -- sleep 3600
 
           kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod/post-deploy-gate --timeout=180s
-
           kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "mkdir -p /work/.github/scripts /work/artifacts/processed"
 
-          # Copy pinned deps + gate script + aligned val csv into the pod
           kubectl cp requirements-api.txt "${K8S_NAMESPACE}/post-deploy-gate:/work/requirements-api.txt"
           kubectl cp .github/scripts/post_deploy_gate.py "${K8S_NAMESPACE}/post-deploy-gate:/work/.github/scripts/post_deploy_gate.py"
           kubectl cp "${VAL_CSV_ALIGNED}" "${K8S_NAMESPACE}/post-deploy-gate:/work/artifacts/processed/val_for_api.csv"
 
-          # Install deps inside the pod and run the gate
           kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "python -m pip install --upgrade pip && pip install -r /work/requirements-api.txt requests"
 
           kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "\
@@ -484,7 +407,6 @@ jobs:
               --out /work/post_deploy_gate.json \
           "
 
-          # Copy report back to runner for artifact upload
           mkdir -p artifacts
           kubectl cp "${K8S_NAMESPACE}/post-deploy-gate:/work/post_deploy_gate.json" "${POST_DEPLOY_OUT}"
 
@@ -515,11 +437,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Delete in-cluster test service (safe even if missing)
-          if [ -f "${HOME}/.kube/config" ]; then
-            kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
-            kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
-          fi
+          # Delete any Services first (prevents orphaned cloud LBs if any exist)
+          kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
 
           if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
             eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
@@ -535,4 +456,4 @@ jobs:
           echo "IMPORTANT: You are billed while it runs."
           echo ""
           echo "To destroy manually when done debugging:"
-          echo "  eksctl delete cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --wait"
+          echo " eksctl delete cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --wait"

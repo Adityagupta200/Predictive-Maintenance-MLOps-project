@@ -1,7 +1,8 @@
+# src/api/observability.py
 import os
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from loguru import logger
 from prometheus_client import Counter, Histogram
@@ -49,6 +50,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     """
     Adds X-Request-ID and emits request metrics.
     """
+
     def __init__(self, app: ASGIApp, header_name: str = "X-Request-ID") -> None:
         super().__init__(app)
         self.header_name = header_name

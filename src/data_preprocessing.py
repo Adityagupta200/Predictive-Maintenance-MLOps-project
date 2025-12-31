@@ -78,9 +78,36 @@ def split_by_engine(
 
     train_df = df[df["engine_id"].isin(train_eng)].reset_index(drop=True)
     val_df = df[df["engine_id"].isin(val_eng)].reset_index(drop=True)
-
     LOGGER.info("Train engines: %d, Val engines: %d", len(train_eng), len(val_eng))
     return train_df, val_df
+
+
+def _write_feature_metadata(processed_dir: Path, feature_cols: List[str], target_col: str) -> None:
+    """
+    Writes BOTH:
+      - meta_features.json (canonical): feature_cols / target_col
+      - metafeatures.json  (compat):    featurecols / targetcol
+
+    To avoid fragile coupling across CI/CD + training + serving code, each file
+    includes both key styles.
+    """
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        # canonical (used by current workflow)
+        "feature_cols": feature_cols,
+        "target_col": target_col,
+        # backward compatibility (older code)
+        "featurecols": feature_cols,
+        "targetcol": target_col,
+    }
+
+    (processed_dir / "meta_features.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    (processed_dir / "metafeatures.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
 
 
 def main(config_path: str) -> None:
@@ -100,6 +127,8 @@ def main(config_path: str) -> None:
     full_train = build_training_dataframe(data_dir, fd_sets)
 
     target_col = data_cfg["target_col"]
+
+    # Ensure these are never treated as model features (prevents feature-order bugs).
     drop_cols = ["RUL", "engine_id", "fd_set"]
     feature_cols = [c for c in full_train.columns if c not in drop_cols]
 
@@ -113,13 +142,11 @@ def main(config_path: str) -> None:
 
     train_path = processed_dir / "train.csv"
     val_path = processed_dir / "val.csv"
-    meta_path = processed_dir / "meta_features.json"
 
     train_df.to_csv(train_path, index=False)
     val_df.to_csv(val_path, index=False)
 
-    meta = {"feature_cols": feature_cols, "target_col": target_col}
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    _write_feature_metadata(processed_dir, feature_cols, target_col)
 
     LOGGER.info("Saved processed data to %s", processed_dir)
 

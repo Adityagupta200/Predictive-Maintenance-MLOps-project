@@ -1,5 +1,3 @@
-# src/train_model.py
-
 import argparse
 import json
 import os
@@ -21,7 +19,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.utils import load_config, get_logger
+from src.utils import get_logger, load_config
 
 LOGGER = get_logger("train_model")
 
@@ -30,9 +28,32 @@ def load_processed_data(processed_dir: Path) -> Dict[str, Any]:
     train_df = pd.read_csv(processed_dir / "train.csv")
     val_df = pd.read_csv(processed_dir / "val.csv")
 
-    meta = json.loads((processed_dir / "meta_features.json").read_text(encoding="utf-8"))
-    feature_cols = meta["feature_cols"]
-    target_col = meta["target_col"]
+    meta_path = processed_dir / "meta_features.json"
+    if not meta_path.exists():
+        meta_path = processed_dir / "metafeatures.json"
+
+    if not meta_path.exists():
+        raise SystemExit(
+            f"Missing feature metadata. Expected {processed_dir/'meta_features.json'} "
+            f"or {processed_dir/'metafeatures.json'}."
+        )
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    feature_cols = meta.get("feature_cols") or meta.get("featurecols")
+    target_col = meta.get("target_col") or meta.get("targetcol")
+
+    if not feature_cols or not target_col:
+        raise SystemExit(
+            "Meta features missing required keys. Need feature_cols/target_col "
+            "or featurecols/targetcol."
+        )
+
+    missing = [c for c in feature_cols if c not in train_df.columns]
+    if missing:
+        raise SystemExit(f"train.csv missing required feature columns: {missing}")
+
+    if target_col not in train_df.columns or target_col not in val_df.columns:
+        raise SystemExit(f"Target column {target_col!r} not found in train/val CSVs.")
 
     X_train = train_df[feature_cols].to_numpy()
     y_train = train_df[target_col].to_numpy()
@@ -57,7 +78,6 @@ def build_pipeline(params: Dict[str, Any], random_state: int) -> Pipeline:
         tree_method="hist",
         **params,
     )
-
     return Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -90,13 +110,8 @@ def evaluate_regression(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, flo
 
 
 def _mlflow_http_reachable(tracking_uri: str, timeout_sec: float = 2.0) -> bool:
-    """
-    If tracking_uri is HTTP(S), check if an MLflow server is reachable.
-    Uses a lightweight endpoint; any response <500 counts as reachable.
-    """
     if not tracking_uri.startswith(("http://", "https://")):
         return True
-
     url = tracking_uri.rstrip("/") + "/api/2.0/mlflow/experiments/list"
     try:
         with urlopen(url, timeout=timeout_sec) as resp:
@@ -106,11 +121,6 @@ def _mlflow_http_reachable(tracking_uri: str, timeout_sec: float = 2.0) -> bool:
 
 
 def _normalize_tracking_uri(tracking_uri: str) -> str:
-    """
-    If user configured an HTTP server but it's not running, fallback to local file store
-    so DVC pipeline doesn't fail on developer machines.
-    Set MLFLOW_STRICT=1 to force failure instead of fallback.
-    """
     strict = os.getenv("MLFLOW_STRICT", "0").strip().lower() in {"1", "true", "yes"}
     if tracking_uri.startswith(("http://", "https://")) and not _mlflow_http_reachable(tracking_uri):
         if strict:
@@ -130,13 +140,11 @@ def _normalize_tracking_uri(tracking_uri: str) -> str:
 
 def _resolve_mlflow_settings(config: Dict[str, Any]) -> Tuple[str, str, Optional[str]]:
     mlflow_cfg = config["mlflow"]
-
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
     experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
     registered_model_name = (
         os.getenv("MLFLOW_REGISTERED_MODEL_NAME", mlflow_cfg.get("registered_model_name", "")) or None
     )
-
     tracking_uri = _normalize_tracking_uri(tracking_uri)
     return tracking_uri, experiment_name, registered_model_name
 
@@ -174,7 +182,6 @@ def train_with_optuna(config: Dict[str, Any], processed_dir: Path) -> optuna.Stu
         study_name=train_cfg["study_name"],
     )
 
-    # IMPORTANT: use the same (possibly normalized) tracking_uri for Optuna's MLflow callback
     mlflow_cb = MLflowCallback(
         tracking_uri=tracking_uri,
         metric_name="rmse",
@@ -237,10 +244,9 @@ def log_best_model_and_artifacts(study: optuna.Study, config: Dict[str, Any], pr
         "n_trials": int(train_cfg["n_trials"]),
         "study_name": train_cfg["study_name"],
     }
-
     write_metrics_json(metrics_path=metrics_path, metric_payload=metric_payload)
 
-    # 2) Train final model on train+val for deployment artifact (keeps your existing behavior).
+    # 2) Train final model on train+val for deployment artifact.
     X_full = np.concatenate([data["X_train"], data["X_val"]], axis=0)
     y_full = np.concatenate([data["y_train"], data["y_val"]], axis=0)
 
@@ -253,8 +259,6 @@ def log_best_model_and_artifacts(study: optuna.Study, config: Dict[str, Any], pr
 
         mlflow.log_params(best_params)
         mlflow.log_metric("train_time_full_sec", float(train_time_full))
-
-        # Also log gate metrics for visibility in MLflow (but gate no longer depends on MLflow).
         for k, v in gate_metrics.items():
             mlflow.log_metric(f"val_{k}", float(v))
 
@@ -266,7 +270,12 @@ def log_best_model_and_artifacts(study: optuna.Study, config: Dict[str, Any], pr
 
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
+
+    # Canonical path used by API + CI
     joblib.dump(final_pipeline, models_dir / "best_model.joblib")
+    # Backward-compatible path (older references)
+    joblib.dump(final_pipeline, models_dir / "bestmodel.joblib")
+
     LOGGER.info("Saved best model pipeline to %s", models_dir / "best_model.joblib")
 
 
