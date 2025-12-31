@@ -258,7 +258,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gettext-base
 
-      # ---------- FIX: preflight CloudFormation stacks to avoid AlreadyExistsException ----------
+      # ---------- Preflight: EKS + CloudFormation stacks ----------
       - name: Check EKS cluster + eksctl CloudFormation stacks (reuse)
         id: preflight
         run: |
@@ -277,9 +277,8 @@ jobs:
             echo "Cluster does not exist."
           fi
 
-          # Any eksctl-managed stack has prefix: eksctl-<clustername>-
           STACKS="$(aws cloudformation list-stacks \
-            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
             --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
             --output text || true)"
 
@@ -294,6 +293,7 @@ jobs:
           echo "cluster_exists=${CLUSTER_EXISTS}" >> "$GITHUB_OUTPUT"
           echo "stack_exists=${STACK_EXISTS}" >> "$GITHUB_OUTPUT"
 
+      # ---------- FIX: disable TerminationProtection before delete ----------
       - name: Cleanup orphan eksctl CloudFormation stacks (only if cluster missing)
         if: steps.preflight.outputs.cluster_exists != 'true' && steps.preflight.outputs.stack_exists == 'true'
         run: |
@@ -301,7 +301,7 @@ jobs:
           echo "Cluster is missing but eksctl stacks exist. Cleaning orphan stacks to unblock create..."
 
           STACKS="$(aws cloudformation list-stacks \
-            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
             --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
             --output text || true)"
 
@@ -310,13 +310,16 @@ jobs:
             exit 0
           fi
 
-          # Delete nodegroup stacks first, then cluster stack (reverse-sort usually helps)
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Disabling termination protection: ${s}"
+            aws cloudformation update-termination-protection --stack-name "${s}" --no-enable-termination-protection || true
+          done
+
           for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
             echo "Deleting stack: ${s}"
             aws cloudformation delete-stack --stack-name "${s}" || true
           done
 
-          # Wait (best-effort) for deletion
           for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
             echo "Waiting for delete-complete: ${s}"
             aws cloudformation wait stack-delete-complete --stack-name "${s}" || true
@@ -406,20 +409,20 @@ jobs:
           target_col = meta.get("target_col") or meta.get("targetcol") or "RUL"
 
           if not feature_cols:
-            raise SystemExit("meta_features.json missing feature_cols/featurecols")
+              raise SystemExit("meta_features.json missing feature_cols/featurecols")
 
           missing = [c for c in feature_cols if c not in df.columns]
           if missing:
-            raise SystemExit(f"val.csv missing feature columns: {missing}")
+              raise SystemExit(f"val.csv missing feature columns: {missing}")
 
           X = df[feature_cols].copy()
           X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
           if target_col in df.columns:
-            y = pd.to_numeric(df[target_col], errors="coerce")
-            out = pd.concat([X, y.rename("RUL")], axis=1)
+              y = pd.to_numeric(df[target_col], errors="coerce")
+              out = pd.concat([X, y.rename("RUL")], axis=1)
           else:
-            out = X
+              out = X
 
           out.to_csv(out_csv, index=False)
           print(f"Wrote {out_csv} with features={len(feature_cols)}, has_target={'RUL' in out.columns}")
@@ -486,7 +489,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Delete Services first (prevents orphaned cloud LBs if any exist)
           kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
@@ -496,13 +498,18 @@ jobs:
             exit 0
           fi
 
-          # If no cluster exists, still clean up orphan eksctl stacks (best-effort)
+          # No cluster exists -> remove leftover eksctl stacks (disable termination protection first)
           STACKS="$(aws cloudformation list-stacks \
-            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
             --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
             --output text || true)"
 
           if [ -n "${STACKS}" ] && [ "${STACKS}" != "None" ]; then
+            for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+              echo "Disabling termination protection: ${s}"
+              aws cloudformation update-termination-protection --stack-name "${s}" --no-enable-termination-protection || true
+            done
+
             for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
               echo "Deleting orphan stack: ${s}"
               aws cloudformation delete-stack --stack-name "${s}" || true
