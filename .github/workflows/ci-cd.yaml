@@ -10,13 +10,26 @@ on:
   workflow_dispatch:
     inputs:
       run_ephemeral_eks_drill:
-        description: "Create ephemeral EKS, deploy, run post-deploy gate, rollback on failure, then destroy."
+        description: "Create/reuse EKS, deploy, run post-deploy gate, rollback on failure, then destroy (on success)."
         required: true
         default: "false"
         type: choice
         options:
           - "true"
           - "false"
+      destroy_on_failure:
+        description: "If true, destroys EKS even when the drill fails. Default keeps cluster for debugging/reuse."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# Prevent two runs from fighting over the same reused debug cluster on the same branch.
+concurrency:
+  group: pm-eks-debug-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.11"
@@ -73,7 +86,6 @@ jobs:
           ls -la models || true
           test -f models/best_model.joblib
 
-      # Keep EXACTLY the same artifact name used by the existing deploy job.
       - name: Upload model artifact for deploy
         uses: actions/upload-artifact@v4
         with:
@@ -81,7 +93,6 @@ jobs:
           path: models/best_model.joblib
           if-no-files-found: error
 
-      # New: upload val.csv separately for the ephemeral drill post-deploy gate
       - name: Upload validation data for post-deploy checks
         uses: actions/upload-artifact@v4
         with:
@@ -99,7 +110,6 @@ jobs:
           METRICS_PATH: "${{ env.METRICS_PATH }}"
         run: python .github/scripts/check_accuracy_gate.py
 
-  # Manual ephemeral EKS drill that creates resources and ALWAYS destroys them.
   ephemeral-eks-drill:
     needs: test-train-validate
     if: >
@@ -115,23 +125,26 @@ jobs:
 
     env:
       AWS_REGION: ap-south-1
-      CLUSTER_NAME: pm-${{ github.run_id }}
+
+      # Stable cluster naming for reuse across reruns (branch-scoped).
+      # Will be normalized in a step to remove illegal chars.
+      CLUSTER_NAME: pm-debug-${{ github.repository_id }}-${{ github.ref_name }}
+
       K8S_NAMESPACE: default
-      # Must match infra/k8s/deployment.yaml metadata.name
       DEPLOYMENT_NAME: predictive-maintenance-api
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
 
-      # Gate thresholds
       P95_MS_MAX: "200"
       POST_DEPLOY_R2_MIN: "0.90"
 
-      # Local test addresses/files
       BASE_URL: "http://127.0.0.1:18000"
       VAL_CSV: "artifacts/processed/val.csv"
       VAL_CSV_ALIGNED: "artifacts/processed/val_for_api.csv"
       POST_DEPLOY_OUT: "artifacts/post_deploy_gate.json"
       N_REQUESTS: "50"
+
+      DESTROY_ON_FAILURE: ${{ inputs.destroy_on_failure }}
 
     defaults:
       run:
@@ -140,6 +153,26 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Normalize cluster name (stable + EKS-safe)
+        id: normalize_cluster
+        run: |
+          set -euo pipefail
+          raw="${CLUSTER_NAME}"
+          # normalize: lower-case, replace '/' and '_' with '-', keep only [a-z0-9-]
+          name="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr '/_' '--' | tr -cd 'a-z0-9-')"
+          # EKS names should be non-empty and generally safer starting with a letter
+          if [ -z "$name" ]; then
+            name="pm-debug"
+          fi
+          if ! echo "$name" | grep -Eq '^[a-z]'; then
+            name="pm-${name}"
+          fi
+          # avoid extreme lengths (EKS allows long names, but keep reasonable)
+          name="${name:0:80}"
+          echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"
+          echo "cluster_name=$name" >> "$GITHUB_OUTPUT"
+          echo "Using CLUSTER_NAME=$name"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -163,7 +196,6 @@ jobs:
           set -euo pipefail
           mkdir -p models artifacts/processed
 
-          # Model expected by API: models/best_model.joblib
           if [ -f .github_artifacts/models/best_model.joblib ]; then
             cp .github_artifacts/models/best_model.joblib models/best_model.joblib
           elif [ -f .github_artifacts/best_model.joblib ]; then
@@ -175,7 +207,6 @@ jobs:
           fi
           test -f models/best_model.joblib
 
-          # val.csv for post-deploy gate
           if [ -f .post_deploy_artifacts/val.csv ]; then
             cp .post_deploy_artifacts/val.csv artifacts/processed/val.csv
           elif [ -f .post_deploy_artifacts/artifacts/processed/val.csv ]; then
@@ -225,7 +256,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gettext-base
 
-      - name: Render eksctl cluster config
+      - name: Check if EKS cluster exists (reuse)
+        id: check_cluster
+        run: |
+          set -euo pipefail
+          if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            status="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.status' --output text)"
+            echo "Cluster exists. status=${status}"
+            if [ "${status}" != "ACTIVE" ]; then
+              echo "Waiting for cluster to become ACTIVE..."
+              aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+            fi
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Cluster does not exist; will create."
+          fi
+
+      - name: Render eksctl cluster config (create only)
+        if: steps.check_cluster.outputs.exists != 'true'
         run: |
           set -euo pipefail
           export CLUSTER_NAME AWS_REGION
@@ -233,8 +282,9 @@ jobs:
           echo "Rendered cluster config:"
           cat /tmp/cluster.yaml
 
-      - name: Create ephemeral EKS cluster
+      - name: Create EKS cluster (only if missing)
         id: create_cluster
+        if: steps.check_cluster.outputs.exists != 'true'
         run: |
           set -euo pipefail
           eksctl create cluster -f /tmp/cluster.yaml
@@ -245,6 +295,7 @@ jobs:
           version: "v1.30.0"
 
       - name: Configure kubectl for EKS
+        id: kubeconfig
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
@@ -260,7 +311,6 @@ jobs:
         id: port_forward
         run: |
           set -euo pipefail
-
           kubectl port-forward -n "${K8S_NAMESPACE}" deployment/"${DEPLOYMENT_NAME}" 18000:8000 > /tmp/pf.log 2>&1 &
           echo $! > /tmp/pf.pid
 
@@ -278,15 +328,14 @@ jobs:
           kubectl -n "${K8S_NAMESPACE}" get pods -o wide || true
           kubectl -n "${K8S_NAMESPACE}" describe pods || true
           kubectl -n "${K8S_NAMESPACE}" logs -l app="${DEPLOYMENT_NAME}" --all-containers=true --tail=200 || true
-
           exit 1
 
-      - name: Build schema-aligned val.csv for API
+      - name: Build model-aligned val.csv for API (fix feature-count mismatch)
         if: steps.port_forward.outcome == 'success'
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          pip install requests pandas numpy
+          pip install pandas numpy scikit-learn joblib
 
           python - <<'PY'
           import os
@@ -294,87 +343,105 @@ jobs:
 
           import numpy as np
           import pandas as pd
-          import requests
+          import joblib
 
-          base = os.environ["BASE_URL"].rstrip("/")
           src_csv = Path(os.environ["VAL_CSV"])
           out_csv = Path(os.environ["VAL_CSV_ALIGNED"])
+          model_path = Path("models/best_model.joblib")
           out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-          # Load val.csv
           df = pd.read_csv(src_csv)
+          model = joblib.load(model_path)
 
-          def try_infer_required_features_from_openapi():
-            try:
-              openapi = requests.get(f"{base}/openapi.json", timeout=20).json()
-
-              def deref(ref: str):
-                _, _, path = ref.partition("#/")
-                cur = openapi
-                for part in path.split("/"):
-                  cur = cur[part]
-                return cur
-
-              # POST /predict request schema
-              post = openapi["paths"]["/predict"]["post"]
-              req_schema = post["requestBody"]["content"]["application/json"]["schema"]
-              if "$ref" in req_schema:
-                req_schema = deref(req_schema["$ref"])
-
-              # features schema (may be a $ref or may be additionalProperties)
-              features_schema = req_schema.get("properties", {}).get("features", {})
-              if "$ref" in features_schema:
-                features_schema = deref(features_schema["$ref"])
-
-              feature_props = features_schema.get("properties", {}) or {}
-              if feature_props:
-                return list(feature_props.keys())
-
-              # If it's Dict[str, float], OpenAPI commonly uses additionalProperties (no explicit keys)
+          def find_attr(obj, attr, visited=None, depth=0, max_depth=6):
+            if visited is None:
+              visited = set()
+            oid = id(obj)
+            if oid in visited:
               return None
-            except Exception as e:
-              print(f"OpenAPI inference skipped: {e}")
+            visited.add(oid)
+
+            if hasattr(obj, attr):
+              val = getattr(obj, attr)
+              if val is not None:
+                return val
+
+            if depth >= max_depth:
               return None
 
-          required_features = try_infer_required_features_from_openapi()
+            if hasattr(obj, "named_steps"):
+              for step in obj.named_steps.values():
+                v = find_attr(step, attr, visited, depth + 1, max_depth)
+                if v is not None:
+                  return v
 
-          # Build features frame
-          if required_features:
-            X = df.reindex(columns=required_features)
-            print(f"Using OpenAPI-inferred features (count={len(required_features)}).")
+            if hasattr(obj, "steps"):
+              try:
+                for _, step in obj.steps:
+                  v = find_attr(step, attr, visited, depth + 1, max_depth)
+                  if v is not None:
+                    return v
+              except Exception:
+                pass
+
+            for child_name in ("best_estimator_", "estimator", "regressor", "classifier", "model"):
+              if hasattr(obj, child_name):
+                v = find_attr(getattr(obj, child_name), attr, visited, depth + 1, max_depth)
+                if v is not None:
+                  return v
+
+            return None
+
+          feature_names = find_attr(model, "feature_names_in_")
+          n_features = find_attr(model, "n_features_in_")
+
+          if feature_names is not None:
+            feature_names = list(feature_names)
+            n_features = len(feature_names)
+
+          X0 = df.drop(columns=["RUL"], errors="ignore")
+          drop_like = [c for c in X0.columns if str(c).lower().startswith("unnamed")]
+          if drop_like:
+            X0 = X0.drop(columns=drop_like, errors="ignore")
+
+          X0 = X0.apply(pd.to_numeric, errors="coerce")
+          X0 = X0.dropna(axis=1, how="all")
+
+          if n_features is None:
+            raise SystemExit(
+              "Could not infer n_features from model artifact. "
+              "Ensure the saved model exposes n_features_in_ or feature_names_in_."
+            )
+
+          if feature_names is not None:
+            X = df.reindex(columns=feature_names).apply(pd.to_numeric, errors="coerce")
           else:
-            # Fallback: take everything except label, then force numeric
-            X = df.drop(columns=["RUL"], errors="ignore")
-            print(f"Using fallback features from val.csv columns (count={X.shape[1]}).")
+            X = X0.copy()
+            if X.shape[1] > n_features:
+              X = X.iloc[:, :n_features]
+            elif X.shape[1] < n_features:
+              for i in range(n_features - X.shape[1]):
+                X[f"_pad_{i}"] = 0.0
 
-          # Force numeric; drop non-numeric columns (all-NaN after coercion)
-          X = X.apply(pd.to_numeric, errors="coerce")
-          X = X.dropna(axis=1, how="all")
-
-          if X.shape[1] == 0:
-            raise SystemExit("val.csv has no numeric feature columns after cleaning; cannot run production post-deploy gate.")
-
-          # Prefer rows with no NaNs across chosen features
           X_valid = X.dropna(axis=0, how="any")
           keep_rul = "RUL" in df.columns
 
           if len(X_valid) == 0:
-            # Hard fallback: still test the service with a valid numeric payload
             X_valid = X.fillna(0.0).head(1)
             keep_rul = False
 
-          # Attach labels only if we kept real rows and labels are numeric
           if keep_rul:
             y = pd.to_numeric(df.loc[X_valid.index, "RUL"], errors="coerce")
             if y.isna().any():
               keep_rul = False
-            else:
-              out = pd.concat([X_valid.reset_index(drop=True), y.reset_index(drop=True).rename("RUL")], axis=1)
-          if not keep_rul:
+
+          if keep_rul:
+            out = pd.concat([X_valid.reset_index(drop=True), y.reset_index(drop=True).rename("RUL")], axis=1)
+          else:
             out = X_valid.reset_index(drop=True)
 
           out.to_csv(out_csv, index=False)
-          print(f"Wrote aligned CSV: {out_csv} rows={len(out)} cols={len(out.columns)} keep_rul={keep_rul}")
+          print(f"Wrote {out_csv} with cols={len(out.columns)} (features={n_features}, keep_rul={keep_rul})")
           PY
 
       - name: Post-deploy gate (smoke + p95 + optional R2)
@@ -393,11 +460,12 @@ jobs:
           python .github/scripts/post_deploy_gate.py --base-url "${BASE_URL}" --val-csv "${VAL_CSV}"
 
       - name: Rollback on gate failure (in-cluster)
-        if: failure() && steps.create_cluster.outcome == 'success'
+        if: failure() && steps.kubeconfig.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          kubectl rollout undo deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}"
-          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
+          kubectl rollout undo deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" || true
+          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=180s || true
 
       - name: Upload post-deploy report
         if: always()
@@ -407,14 +475,18 @@ jobs:
           path: artifacts/post_deploy_gate.json
           if-no-files-found: warn
 
-      - name: Cleanup (always)
+      - name: Stop port-forward (always)
         if: always()
         run: |
           set -euo pipefail
-
           if [ -f /tmp/pf.pid ]; then
             kill "$(cat /tmp/pf.pid)" || true
           fi
+
+      - name: Destroy EKS resources (success or override)
+        if: success() || env.DESTROY_ON_FAILURE == 'true'
+        run: |
+          set -euo pipefail
 
           if [ -f "${HOME}/.kube/config" ]; then
             kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
@@ -426,3 +498,13 @@ jobs:
           else
             echo "Cluster ${CLUSTER_NAME} does not exist; skipping eksctl delete."
           fi
+
+      - name: Keep cluster for debugging/reuse (failure)
+        if: failure() && env.DESTROY_ON_FAILURE != 'true'
+        run: |
+          set -euo pipefail
+          echo "Drill failed and cluster is being kept for reuse on next run."
+          echo "IMPORTANT: You are billed while it runs."
+          echo ""
+          echo "To destroy manually when done debugging:"
+          echo "  eksctl delete cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --wait"
