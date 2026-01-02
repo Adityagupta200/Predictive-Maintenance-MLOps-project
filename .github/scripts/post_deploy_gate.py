@@ -27,7 +27,20 @@ def to_jsonable(v):
     return v
 
 
-def main():
+def write_report(path: Path, report: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _clean(obj):
+        if isinstance(obj, dict):
+            return {k: _clean(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_clean(v) for v in obj]
+        return to_jsonable(obj)
+
+    path.write_text(json.dumps(_clean(report), indent=2), encoding="utf-8")
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default=os.getenv("BASE_URL"))
     parser.add_argument("--val-csv", default=os.getenv("VAL_CSV"))
@@ -37,92 +50,110 @@ def main():
     parser.add_argument("--out", default=os.getenv("POST_DEPLOY_OUT", "artifacts/post_deploy_gate.json"))
     args = parser.parse_args()
 
-    if not args.base_url:
-        raise SystemExit("Missing --base-url / BASE_URL")
-    if not args.val_csv:
-        raise SystemExit("Missing --val-csv / VAL_CSV")
-
-    base = args.base_url.rstrip("/")
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # 1) Smoke
-    r = requests.get(f"{base}/health", timeout=10)
-    if r.status_code != 200:
-        raise SystemExit(f"/health failed: {r.status_code} {r.text}")
-
-    df = pd.read_csv(args.val_csv)
-    if len(df) == 0:
-        raise SystemExit("val csv is empty")
-
-    target_col = "RUL" if "RUL" in df.columns else None
-
-    # If target exists, keep it for R2, but never send it to the model.
-    y_true = None
-    if target_col:
-        y_true = pd.to_numeric(df[target_col], errors="coerce").to_numpy()
-        X = df.drop(columns=[target_col])
-    else:
-        X = df
-
-    n = min(args.n_requests, len(X))
-    X = X.head(n)
-
-    lat_ms = []
-    preds = []
-
-    for i in range(n):
-        row = X.iloc[i].to_dict()
-        payload = {"features": {k: to_jsonable(v) for k, v in row.items()}}
-
-        start = time.perf_counter()
-        resp = requests.post(f"{base}/predict", json=payload, timeout=30)
-        elapsed = (time.perf_counter() - start) * 1000.0
-        lat_ms.append(elapsed)
-
-        if resp.status_code != 200:
-            raise SystemExit(f"/predict failed: {resp.status_code} {resp.text}")
-
-        body = resp.json()
-        if "prediction" not in body:
-            raise SystemExit(f"/predict response missing 'prediction': {body}")
-
-        preds.append(float(body["prediction"]))
 
     report = {
-        "ok": True,
+        "ok": False,
+        "base_url": args.base_url,
         "checks": {
-            "health_ok": True,
-            "n_requests": n,
-            "p95_ms": p95(lat_ms),
+            "health_ok": False,
+            "latency_ok": None,
+            "r2_ok": None,
+            "n_requests": 0,
+            "p95_ms": None,
             "p95_ms_max": args.p95_ms_max,
+            "r2": None,
+            "r2_min": args.r2_min,
         },
+        "error": None,
     }
 
-    if report["checks"]["p95_ms"] > args.p95_ms_max:
-        report["ok"] = False
-        report["checks"]["latency_ok"] = False
-        out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        raise SystemExit(f"Latency gate failed: p95={report['checks']['p95_ms']:.2f}ms > {args.p95_ms_max:.2f}ms")
+    try:
+        if not args.base_url:
+            raise ValueError("Missing --base-url / BASE_URL")
+        if not args.val_csv:
+            raise ValueError("Missing --val-csv / VAL_CSV")
 
-    report["checks"]["latency_ok"] = True
+        base = args.base_url.rstrip("/")
 
-    if y_true is not None:
-        y_true = y_true[:n]
-        r2 = float(r2_score(y_true, np.asarray(preds, dtype=float)))
-        report["checks"]["r2"] = r2
-        report["checks"]["r2_min"] = args.r2_min
-        if r2 < args.r2_min:
+        # 1) Smoke
+        r = requests.get(f"{base}/health", timeout=10)
+        if r.status_code != 200:
+            raise RuntimeError(f"/health failed: {r.status_code} {r.text}")
+        report["checks"]["health_ok"] = True
+
+        # 2) Load validation data
+        df = pd.read_csv(args.val_csv)
+        if len(df) == 0:
+            raise RuntimeError("val csv is empty")
+
+        target_col = "RUL" if "RUL" in df.columns else None
+
+        y_true = None
+        if target_col:
+            y_true = pd.to_numeric(df[target_col], errors="coerce").to_numpy()
+            X = df.drop(columns=[target_col])
+        else:
+            X = df
+
+        n = min(args.n_requests, len(X))
+        report["checks"]["n_requests"] = int(n)
+        X = X.head(n)
+
+        # 3) Latency + predictions
+        lat_ms = []
+        preds = []
+
+        for i in range(n):
+            row = X.iloc[i].to_dict()
+            payload = {"features": {k: to_jsonable(v) for k, v in row.items()}}
+
+            start = time.perf_counter()
+            resp = requests.post(f"{base}/predict", json=payload, timeout=30)
+            elapsed = (time.perf_counter() - start) * 1000.0
+            lat_ms.append(elapsed)
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"/predict failed: {resp.status_code} {resp.text}")
+
+            body = resp.json()
+            if "prediction" not in body:
+                raise RuntimeError(f"/predict response missing 'prediction': {body}")
+
+            preds.append(float(body["prediction"]))
+
+        report["checks"]["p95_ms"] = p95(lat_ms)
+
+        if report["checks"]["p95_ms"] > args.p95_ms_max:
+            report["checks"]["latency_ok"] = False
             report["ok"] = False
-            report["checks"]["r2_ok"] = False
-            out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-            raise SystemExit(f"R2 gate failed: r2={r2:.4f} < {args.r2_min:.4f}")
-        report["checks"]["r2_ok"] = True
-    else:
-        report["checks"]["r2_skipped"] = True
+            return 1
+        report["checks"]["latency_ok"] = True
 
-    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        # 4) Optional R2 gate
+        if y_true is not None:
+            y_true = y_true[:n]
+            r2 = float(r2_score(y_true, np.asarray(preds, dtype=float)))
+            report["checks"]["r2"] = r2
+            if r2 < args.r2_min:
+                report["checks"]["r2_ok"] = False
+                report["ok"] = False
+                return 1
+            report["checks"]["r2_ok"] = True
+        else:
+            report["checks"]["r2_ok"] = None
+
+        report["ok"] = True
+        return 0
+
+    except Exception as e:
+        report["ok"] = False
+        report["error"] = {"type": type(e).__name__, "message": str(e)}
+        return 1
+
+    finally:
+        write_report(out_path, report)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
