@@ -433,6 +433,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Ensure local output dir exists on the GitHub runner (this is what upload-artifact reads)
+          mkdir -p "$(dirname "${POST_DEPLOY_OUT}")"
+
           kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
           kubectl run post-deploy-gate \
             -n "${K8S_NAMESPACE}" \
@@ -441,14 +444,18 @@ jobs:
             --command -- sleep 3600
 
           kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod/post-deploy-gate --timeout=180s
+
           kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "mkdir -p /work/.github/scripts /work/artifacts/processed"
 
           kubectl cp requirements-api.txt "${K8S_NAMESPACE}/post-deploy-gate:/work/requirements-api.txt"
           kubectl cp .github/scripts/post_deploy_gate.py "${K8S_NAMESPACE}/post-deploy-gate:/work/.github/scripts/post_deploy_gate.py"
           kubectl cp "${VAL_CSV_ALIGNED}" "${K8S_NAMESPACE}/post-deploy-gate:/work/artifacts/processed/val_for_api.csv"
 
-          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "python -m pip install --upgrade pip && pip install -r /work/requirements-api.txt requests"
+          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc \
+            "python -m pip install --upgrade pip && pip install -r /work/requirements-api.txt requests"
 
+          # Run the gate, but capture its exit code so we can still copy out the report.
+          set +e
           kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "\
             python /work/.github/scripts/post_deploy_gate.py \
               --base-url '${IN_CLUSTER_BASE_URL}' \
@@ -456,11 +463,39 @@ jobs:
               --n-requests '${N_REQUESTS}' \
               --p95-ms-max '${P95_MS_MAX}' \
               --r2-min '${POST_DEPLOY_R2_MIN}' \
-              --out /work/post_deploy_gate.json \
-          "
+              --out /work/post_deploy_gate.json"
+          GATE_RC=$?
+          set -e
 
-          mkdir -p artifacts
-          kubectl cp "${K8S_NAMESPACE}/post-deploy-gate:/work/post_deploy_gate.json" "${POST_DEPLOY_OUT}"
+          # Always try to copy the report back to the runner workspace
+          kubectl cp "${K8S_NAMESPACE}/post-deploy-gate:/work/post_deploy_gate.json" "${POST_DEPLOY_OUT}" || true
+
+          # If the report still doesn't exist, create a fallback artifact so upload-artifact doesn't warn
+          if [ ! -f "${POST_DEPLOY_OUT}" ]; then
+            echo "Post-deploy report missing; writing fallback JSON to ${POST_DEPLOY_OUT}"
+            LOGS="$(kubectl logs -n "${K8S_NAMESPACE}" post-deploy-gate 2>/dev/null | tail -n 200 || true)"
+            python - <<PY
+            import json, os
+            out = os.environ["POST_DEPLOY_OUT"]
+            logs = os.environ.get("LOGS","")
+            payload = {
+              "status": "error",
+              "message": "post_deploy_gate did not produce /work/post_deploy_gate.json (kubectl cp failed or script crashed).",
+              "gate_rc": int(os.environ.get("GATE_RC","1")),
+              "tail_logs": logs,
+            }
+            with open(out, "w", encoding="utf-8") as f:
+              json.dump(payload, f, indent=2)
+            print("Wrote fallback report:", out)
+            PY
+                fi
+
+          # Preserve pass/fail behavior of the gate step
+          exit "${GATE_RC}"
+        env:
+          LOGS: ${{ '' }}
+          GATE_RC: ${{ '' }}
+
 
       - name: Cleanup gate pod (always)
         if: always()
