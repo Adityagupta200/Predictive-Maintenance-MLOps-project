@@ -557,7 +557,7 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: Deploy (ephemeral drill: Deployment only)
+      - name: "Deploy (ephemeral drill: Deployment only)"
         run: |
           set -euo pipefail
           kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
@@ -631,8 +631,7 @@ jobs:
           print(f"Wrote {out_csv} with features={len(feature_cols)}, has_target={'RUL' in out.columns}")
           PY
 
-      # Robust: job still fails on gate failure, but always produces artifacts/post_deploy_gate.json on the runner.
-      - name: Post-deploy gate (in-cluster: smoke + p95 + optional R2)
+      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)"
         id: post_deploy_gate
         run: |
           set -euo pipefail
