@@ -664,7 +664,7 @@ jobs:
           print(f"Wrote {out_csv} with features={len(feature_cols)}, has_target={'RUL' in out.columns}")
           PY
 
-      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)""
+      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)"
         id: post_deploy_gate
         continue-on-error: true
         run: |
