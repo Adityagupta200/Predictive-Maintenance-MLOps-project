@@ -1,7 +1,6 @@
 name: rollback-production
 
 on:
-  # Manual rollback (kept exactly as a supported path)
   workflow_dispatch:
     inputs:
       reason:
@@ -12,97 +11,159 @@ on:
         description: "Optional: rollback to a specific revision number (leave empty to rollback to previous)"
         required: false
         type: string
+      cluster_name:
+        description: "EKS cluster name (optional override; else uses secret EKS_CLUSTER_NAME)"
+        required: false
+        type: string
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        default: "default"
+        type: string
+      deployment_name:
+        description: "Kubernetes deployment name"
+        required: true
+        default: "predictive-maintenance-api"
+        type: string
+      destroy_cluster_after_test:
+        description: "Demo only: delete the EKS cluster after successful rollback verification"
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
 
-  # Automated trigger (from monitoring/webhook)
-  # Example event_type: model_degraded
   repository_dispatch:
     types: [model_degraded]
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   rollback:
     runs-on: ubuntu-latest
-
-    # Prevent two rollbacks from running at the same time
     concurrency:
       group: rollback-production
       cancel-in-progress: false
 
     env:
-      DEPLOYMENT_NAME: predictive-maintenance-api
-      NAMESPACE: default
+      AWS_REGION: ap-south-1
 
     steps:
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "v1.30.0"
-
-      - name: Configure kubeconfig
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.kube"
-          if [ -z "${{ secrets.KUBECONFIG_CONTENTS }}" ]; then
-            echo "KUBECONFIG_CONTENTS secret is missing or empty."
-            exit 1
-          fi
-          cat > "$HOME/.kube/config" << 'EOF'
-          ${{ secrets.KUBECONFIG_CONTENTS }}
-          EOF
+      - uses: actions/checkout@v4
 
       - name: Resolve rollback inputs (manual vs automated)
         id: vars
         shell: bash
         run: |
           set -euo pipefail
-
-          EVENT_NAME="${{ github.event_name }}"
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REASON="${{ inputs.reason }}"
-            TO_REVISION="${{ inputs.to_revision }}"
+            TO_REV="${{ inputs.to_revision }}"
+            CLUSTER="${{ inputs.cluster_name }}"
+            NS="${{ inputs.namespace }}"
+            DEPLOY="${{ inputs.deployment_name }}"
+            DESTROY="${{ inputs.destroy_cluster_after_test }}"
           else
-            # repository_dispatch payload lives under github.event.client_payload
             REASON="${{ github.event.client_payload.reason }}"
-            TO_REVISION="${{ github.event.client_payload.to_revision }}"
+            TO_REV="${{ github.event.client_payload.to_revision }}"
+            CLUSTER="${{ github.event.client_payload.cluster_name }}"
+            NS="${{ github.event.client_payload.namespace }}"
+            DEPLOY="${{ github.event.client_payload.deployment_name }}"
+            DESTROY="false"
           fi
 
-          if [ -z "${REASON:-}" ]; then
-            echo "Rollback reason is required (inputs.reason or client_payload.reason)."
-            exit 1
+          if [ -z "${CLUSTER:-}" ]; then
+            CLUSTER="${{ secrets.EKS_CLUSTER_NAME }}"
           fi
 
-          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
-          echo "to_revision=${TO_REVISION:-}" >> "$GITHUB_OUTPUT"
+          test -n "${REASON}"
+          test -n "${CLUSTER}"
+          test -n "${NS}"
+          test -n "${DEPLOY}"
 
-      - name: Show current deployment state (pre-rollback)
-        shell: bash
+          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+          echo "to_revision=${TO_REV:-}" >> "$GITHUB_OUTPUT"
+          echo "cluster=${CLUSTER}" >> "$GITHUB_OUTPUT"
+          echo "namespace=${NS}" >> "$GITHUB_OUTPUT"
+          echo "deploy=${DEPLOY}" >> "$GITHUB_OUTPUT"
+          echo "destroy=${DESTROY}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.EKS_DEPLOY }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubectl for EKS
         run: |
           set -euo pipefail
-          echo "Rollback reason: ${{ steps.vars.outputs.reason }}"
-          kubectl -n "${NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o wide
-          kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT_NAME}"
+          aws eks update-kubeconfig \
+            --name "${{ steps.vars.outputs.cluster }}" \
+            --region "${AWS_REGION}"
+
+      - name: Show current state (pre-rollback)
+        run: |
+          set -euo pipefail
+          kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide
+          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout history deployment/"${{ steps.vars.outputs.deploy }}" | tee rollout_history_before.txt
 
       - name: Roll back deployment
-        shell: bash
         run: |
           set -euo pipefail
-
           TO_REV="${{ steps.vars.outputs.to_revision }}"
-
           if [ -n "${TO_REV}" ]; then
-            # Roll back to a specific revision when provided
-            kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}" --to-revision="${TO_REV}"
+            kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}" --to-revision="${TO_REV}"
           else
-            # Default: roll back to previous revision
-            kubectl -n "${NAMESPACE}" rollout undo deployment/"${DEPLOYMENT_NAME}"
+            kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}"
           fi
+          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout status deployment/"${{ steps.vars.outputs.deploy }}" --timeout=180s
 
-          kubectl -n "${NAMESPACE}" rollout status deployment/"${DEPLOYMENT_NAME}" --timeout=180s
-
-      - name: Show deployment state (post-rollback)
-        shell: bash
+      - name: Verify service health after rollback (port-forward + /health)
         run: |
           set -euo pipefail
-          kubectl -n "${NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o wide
-          kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT_NAME}"
+          kubectl -n "${{ steps.vars.outputs.namespace }}" port-forward deployment/"${{ steps.vars.outputs.deploy }}" 18000:8000 >/tmp/pf.log 2>&1 &
+          PF_PID=$!
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:18000/health" >/dev/null; then
+              echo "Health OK after rollback"
+              kill "${PF_PID}" || true
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed after rollback; pf logs:"
+          tail -n 200 /tmp/pf.log || true
+          kill "${PF_PID}" || true
+          exit 1
+
+      - name: Show state (post-rollback)
+        if: always()
+        run: |
+          set -euo pipefail
+          kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide
+          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout history deployment/"${{ steps.vars.outputs.deploy }}" | tee rollout_history_after.txt
+
+      - name: Upload rollback artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-artifacts
+          path: |
+            rollout_history_before.txt
+            rollout_history_after.txt
+
+      - name: "Demo cleanup (optional): delete EKS cluster"
+        if: steps.vars.outputs.destroy == 'true'
+        run: |
+          set -euo pipefail
+          echo "Deleting cluster '${{ steps.vars.outputs.cluster }}' (demo cleanup)..."
+          curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl delete cluster --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}" --wait

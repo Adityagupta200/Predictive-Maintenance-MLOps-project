@@ -1,10 +1,10 @@
-# src/train_model.py
 import argparse
 import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Tuple
+from urllib.request import urlopen
 
 import joblib
 import mlflow
@@ -19,7 +19,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.utils import load_config, get_logger
+from src.utils import get_logger, load_config
 
 LOGGER = get_logger("train_model")
 
@@ -28,17 +28,37 @@ def load_processed_data(processed_dir: Path) -> Dict[str, Any]:
     train_df = pd.read_csv(processed_dir / "train.csv")
     val_df = pd.read_csv(processed_dir / "val.csv")
 
-    with open(processed_dir / "meta_features.json", "r") as f:
-        meta = json.load(f)
+    meta_path = processed_dir / "meta_features.json"
+    if not meta_path.exists():
+        meta_path = processed_dir / "metafeatures.json"
 
-    feature_cols = meta["feature_cols"]
-    target_col = meta["target_col"]
+    if not meta_path.exists():
+        raise SystemExit(
+            f"Missing feature metadata. Expected {processed_dir/'meta_features.json'} "
+            f"or {processed_dir/'metafeatures.json'}."
+        )
 
-    X_train = train_df[feature_cols].values
-    y_train = train_df[target_col].values
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    feature_cols = meta.get("feature_cols") or meta.get("featurecols")
+    target_col = meta.get("target_col") or meta.get("targetcol")
 
-    X_val = val_df[feature_cols].values
-    y_val = val_df[target_col].values
+    if not feature_cols or not target_col:
+        raise SystemExit(
+            "Meta features missing required keys. Need feature_cols/target_col "
+            "or featurecols/targetcol."
+        )
+
+    missing = [c for c in feature_cols if c not in train_df.columns]
+    if missing:
+        raise SystemExit(f"train.csv missing required feature columns: {missing}")
+
+    if target_col not in train_df.columns or target_col not in val_df.columns:
+        raise SystemExit(f"Target column {target_col!r} not found in train/val CSVs.")
+
+    X_train = train_df[feature_cols].to_numpy()
+    y_train = train_df[target_col].to_numpy()
+    X_val = val_df[feature_cols].to_numpy()
+    y_val = val_df[target_col].to_numpy()
 
     return {
         "X_train": X_train,
@@ -50,8 +70,25 @@ def load_processed_data(processed_dir: Path) -> Dict[str, Any]:
     }
 
 
-def create_pipeline(trial: optuna.Trial, random_state: int) -> Pipeline:
-    params = {
+def build_pipeline(params: Dict[str, Any], random_state: int) -> Pipeline:
+    model = xgb.XGBRegressor(
+        objective="reg:squarederror",
+        random_state=random_state,
+        n_jobs=-1,
+        tree_method="hist",
+        **params,
+    )
+    return Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("model", model),
+        ]
+    )
+
+
+def suggest_params(trial: optuna.Trial) -> Dict[str, Any]:
+    return {
         "n_estimators": trial.suggest_int("n_estimators", 150, 600),
         "max_depth": trial.suggest_int("max_depth", 3, 10),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -63,81 +100,87 @@ def create_pipeline(trial: optuna.Trial, random_state: int) -> Pipeline:
         "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),
     }
 
-    model = xgb.XGBRegressor(
-        objective="reg:squarederror",
-        random_state=random_state,
-        n_jobs=-1,
-        tree_method="hist",
-        **params,
-    )
 
-    return Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-            ("model", model),
-        ]
-    )
+def evaluate_regression(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    r2 = float(r2_score(y_true, y_pred))
+    residuals_std = float(np.std(y_true - y_pred))
+    return {"rmse": rmse, "mae": mae, "r2": r2, "residuals_std": residuals_std}
 
 
-def objective(
-    trial: optuna.Trial,
-    data: Dict[str, Any],
-    experiment_name: str,
-    random_state: int,
-) -> float:
-    X_train, y_train = data["X_train"], data["y_train"]
-    X_val, y_val = data["X_val"], data["y_val"]
-
-    with mlflow.start_run(run_name=f"trial_{trial.number}", nested=True):
-        # Experiment already set in train_with_optuna, but safe to call again
-        mlflow.set_experiment(experiment_name)
-
-        pipeline = create_pipeline(trial, random_state=random_state)
-
-        start = time.perf_counter()
-        pipeline.fit(X_train, y_train)
-        train_time = time.perf_counter() - start
-
-        y_pred = pipeline.predict(X_val)
-
-        rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
-        mae = float(mean_absolute_error(y_val, y_pred))
-        r2 = float(r2_score(y_val, y_pred))
-
-        mlflow.log_params(trial.params)
-        mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("mae", mae)
-        mlflow.log_metric("r2", r2)
-        mlflow.log_metric("train_time_sec", train_time)
-        mlflow.log_metric("residuals_std", float(np.std(y_val - y_pred)))
-
-        return rmse
+def _mlflow_http_reachable(tracking_uri: str, timeout_sec: float = 2.0) -> bool:
+    if not tracking_uri.startswith(("http://", "https://")):
+        return True
+    url = tracking_uri.rstrip("/") + "/api/2.0/mlflow/experiments/list"
+    try:
+        with urlopen(url, timeout=timeout_sec) as resp:
+            return int(resp.status) < 500
+    except Exception:
+        return False
 
 
-def _resolve_mlflow_settings(config: Dict[str, Any]) -> tuple[str, str, str | None]:
+def _normalize_tracking_uri(tracking_uri: str) -> str:
+    strict = os.getenv("MLFLOW_STRICT", "0").strip().lower() in {"1", "true", "yes"}
+    if tracking_uri.startswith(("http://", "https://")) and not _mlflow_http_reachable(tracking_uri):
+        if strict:
+            raise SystemExit(
+                f"MLflow tracking server unreachable at {tracking_uri}. "
+                "Start MLflow server or set MLFLOW_TRACKING_URI=file:./mlruns."
+            )
+        fallback = "file:./mlruns"
+        LOGGER.warning(
+            "MLflow tracking server unreachable at %s. Falling back to local store %s",
+            tracking_uri,
+            fallback,
+        )
+        return fallback
+    return tracking_uri
+
+
+def _resolve_mlflow_settings(config: Dict[str, Any]) -> Tuple[str, str, Optional[str]]:
     mlflow_cfg = config["mlflow"]
-
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI", mlflow_cfg["tracking_uri"])
     experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", mlflow_cfg["experiment_name"])
-    registered_model_name = os.getenv(
-        "MLFLOW_REGISTERED_MODEL_NAME",
-        mlflow_cfg.get("registered_model_name", ""),
-    ) or None
-
+    registered_model_name = (
+        os.getenv("MLFLOW_REGISTERED_MODEL_NAME", mlflow_cfg.get("registered_model_name", "")) or None
+    )
+    tracking_uri = _normalize_tracking_uri(tracking_uri)
     return tracking_uri, experiment_name, registered_model_name
 
 
 def train_with_optuna(config: Dict[str, Any], processed_dir: Path) -> optuna.Study:
     data = load_processed_data(processed_dir)
-
     train_cfg = config["training"]
-    tracking_uri, experiment_name, _ = _resolve_mlflow_settings(config)
 
+    tracking_uri, experiment_name, _ = _resolve_mlflow_settings(config)
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    study = optuna.create_study(direction="minimize", study_name=train_cfg["study_name"])
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_params(trial)
+        pipeline = build_pipeline(params, random_state=int(train_cfg["random_state"]))
+
+        with mlflow.start_run(run_name=f"trial_{trial.number}", nested=True):
+            start = time.perf_counter()
+            pipeline.fit(data["X_train"], data["y_train"])
+            train_time = time.perf_counter() - start
+
+            y_pred = pipeline.predict(data["X_val"])
+            metrics = evaluate_regression(data["y_val"], y_pred)
+
+            mlflow.log_params(params)
+            for k, v in metrics.items():
+                mlflow.log_metric(k, v)
+            mlflow.log_metric("train_time_sec", float(train_time))
+
+            # Optimize RMSE (lower is better)
+            return float(metrics["rmse"])
+
+    study = optuna.create_study(
+        direction="minimize",
+        study_name=train_cfg["study_name"],
+    )
 
     mlflow_cb = MLflowCallback(
         tracking_uri=tracking_uri,
@@ -147,17 +190,12 @@ def train_with_optuna(config: Dict[str, Any], processed_dir: Path) -> optuna.Stu
     LOGGER.info(
         "Starting Optuna study '%s' for %d trials",
         train_cfg["study_name"],
-        train_cfg["n_trials"],
+        int(train_cfg["n_trials"]),
     )
 
     study.optimize(
-        lambda trial: objective(
-            trial,
-            data=data,
-            experiment_name=experiment_name,
-            random_state=train_cfg["random_state"],
-        ),
-        n_trials=train_cfg["n_trials"],
+        objective,
+        n_trials=int(train_cfg["n_trials"]),
         timeout=train_cfg.get("timeout"),
         callbacks=[mlflow_cb],
         show_progress_bar=False,
@@ -167,57 +205,76 @@ def train_with_optuna(config: Dict[str, Any], processed_dir: Path) -> optuna.Stu
     return study
 
 
-def log_best_model(study: optuna.Study, config: Dict[str, Any], processed_dir: Path) -> None:
+def write_metrics_json(*, metrics_path: Path, metric_payload: Dict[str, Any]) -> None:
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(metric_payload, indent=2), encoding="utf-8")
+    LOGGER.info("Wrote metrics to %s", metrics_path)
+
+
+def log_best_model_and_artifacts(study: optuna.Study, config: Dict[str, Any], processed_dir: Path) -> None:
     data = load_processed_data(processed_dir)
-
     train_cfg = config["training"]
-    tracking_uri, experiment_name, registered_model_name = _resolve_mlflow_settings(config)
 
+    tracking_uri, experiment_name, registered_model_name = _resolve_mlflow_settings(config)
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
-    best_params = study.best_trial.params
+    best_params = dict(study.best_trial.params)
+    random_state = int(train_cfg["random_state"])
 
-    def pipeline_from_params(params: Dict[str, Any]) -> Pipeline:
-        model = xgb.XGBRegressor(
-            objective="reg:squarederror",
-            random_state=train_cfg["random_state"],
-            n_jobs=-1,
-            tree_method="hist",
-            **params,
-        )
-        return Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="median")),
-                ("scaler", StandardScaler()),
-                ("model", model),
-            ]
-        )
+    # 1) Deterministic gate metrics: fit on train split only, evaluate on val split.
+    gate_pipeline = build_pipeline(best_params, random_state=random_state)
 
-    X_train = np.concatenate([data["X_train"], data["X_val"]], axis=0)
-    y_train = np.concatenate([data["y_train"], data["y_val"]], axis=0)
+    start = time.perf_counter()
+    gate_pipeline.fit(data["X_train"], data["y_train"])
+    train_time = time.perf_counter() - start
+
+    y_pred_val = gate_pipeline.predict(data["X_val"])
+    gate_metrics = evaluate_regression(data["y_val"], y_pred_val)
+
+    metrics_dir = Path(config.get("paths", {}).get("metrics_dir", "artifacts/metrics"))
+    metrics_path = metrics_dir / "metrics.json"
+
+    metric_payload = {
+        "problem_type": "regression",
+        "metric_mode_default": {"r2": "max", "rmse": "min", "mae": "min"},
+        "metrics": gate_metrics,
+        "train_time_sec": float(train_time),
+        "best_params": best_params,
+        "n_trials": int(train_cfg["n_trials"]),
+        "study_name": train_cfg["study_name"],
+    }
+    write_metrics_json(metrics_path=metrics_path, metric_payload=metric_payload)
+
+    # 2) Train final model on train+val for deployment artifact.
+    X_full = np.concatenate([data["X_train"], data["X_val"]], axis=0)
+    y_full = np.concatenate([data["y_train"], data["y_val"]], axis=0)
+
+    final_pipeline = build_pipeline(best_params, random_state=random_state)
 
     with mlflow.start_run(run_name="best_model"):
-        pipeline = pipeline_from_params(best_params)
-
-        start = time.perf_counter()
-        pipeline.fit(X_train, y_train)
-        train_time = time.perf_counter() - start
+        start_full = time.perf_counter()
+        final_pipeline.fit(X_full, y_full)
+        train_time_full = time.perf_counter() - start_full
 
         mlflow.log_params(best_params)
-        mlflow.log_metric("train_time_full_sec", train_time)
+        mlflow.log_metric("train_time_full_sec", float(train_time_full))
+        for k, v in gate_metrics.items():
+            mlflow.log_metric(f"val_{k}", float(v))
 
-        # Log the model to MLflow
         mlflow.sklearn.log_model(
-            sk_model=pipeline,
+            sk_model=final_pipeline,
             artifact_path="model",
             registered_model_name=registered_model_name,
         )
 
-    # Persist pipeline locally for API deployment
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipeline, models_dir / "best_model.joblib")
+
+    # Canonical path used by API + CI
+    joblib.dump(final_pipeline, models_dir / "best_model.joblib")
+    # Backward-compatible path (older references)
+    joblib.dump(final_pipeline, models_dir / "bestmodel.joblib")
 
     LOGGER.info("Saved best model pipeline to %s", models_dir / "best_model.joblib")
 
@@ -227,16 +284,11 @@ def main(config_path: str) -> None:
     processed_dir = Path(config["paths"]["processed_dir"])
 
     study = train_with_optuna(config, processed_dir)
-    log_best_model(study, config, processed_dir)
+    log_best_model_and_artifacts(study, config, processed_dir)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="params.yaml",
-        help="Path to params.yaml",
-    )
+    parser.add_argument("--config", type=str, default="params.yaml", help="Path to params.yaml")
     args = parser.parse_args()
     main(args.config)
