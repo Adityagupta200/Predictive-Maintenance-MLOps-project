@@ -1,13 +1,50 @@
-name: Drift Monitoring
+name: Drift Monitoring (Auto-Rollback)
 
 on:
   workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: "EKS cluster name (optional; if empty, uses secret EKS_CLUSTER_NAME)"
+        required: false
+        type: string
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        default: "default"
+        type: string
+      deployment_name:
+        description: "Kubernetes Deployment to rollback"
+        required: true
+        default: "predictive-maintenance-api"
+        type: string
+      simulate_drift:
+        description: "For demo/testing: create a drifted 'current' dataset to force PSI breach"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      psi_threshold:
+        description: "PSI drift threshold"
+        required: true
+        default: "0.2"
+        type: string
   schedule:
     - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   drift-check:
     runs-on: ubuntu-latest
+    env:
+      DRIFT_PSI_THRESHOLD: ${{ github.event_name == 'workflow_dispatch' && inputs.psi_threshold || '0.2' }}
+      SIMULATE_DRIFT: ${{ github.event_name == 'workflow_dispatch' && inputs.simulate_drift || 'false' }}
+      CLUSTER_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.cluster_name || secrets.EKS_CLUSTER_NAME }}
+      NS_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.namespace || 'default' }}
+      DEPLOY_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.deployment_name || 'predictive-maintenance-api' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,16 +54,50 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install evidently
+          pip install evidently pandas numpy
 
-      - name: Run drift check
-        env:
-          DRIFT_PSI_THRESHOLD: "0.2"
+      - name: Install jq (for dispatch payload)
         run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Prepare current dataset (optionally drifted)
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import numpy as np
+          import pandas as pd
+          from pathlib import Path
+
+          cur = Path("artifacts/processed/val.csv")
+          out = Path("reports/current_for_drift_check.csv")
+          out.parent.mkdir(parents=True, exist_ok=True)
+
+          df = pd.read_csv(cur)
+          simulate = (os.getenv("SIMULATE_DRIFT","false").lower() == "true")
+
+          if simulate:
+            num = df.select_dtypes(include=[np.number]).columns
+            for c in num:
+              df[c] = df[c] * 3.0 + 50.0
+
+          df.to_csv(out, index=False)
+          print("Wrote:", out, "simulate_drift=", simulate)
+          PY
+
+      - name: Run drift check (PSI gate)
+        id: drift
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           python scripts/drift_check.py \
             --reference artifacts/processed/train.csv \
-            --current artifacts/processed/val.csv \
+            --current reports/current_for_drift_check.csv \
             --out_dir reports
 
       - name: Upload drift reports
@@ -35,3 +106,29 @@ jobs:
         with:
           name: drift-reports
           path: reports/
+
+      - name: Trigger automated rollback (repository_dispatch)
+        if: steps.drift.outcome != 'success' && env.CLUSTER_FOR_ROLLBACK != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          reason="PSI drift breached threshold=${DRIFT_PSI_THRESHOLD} (see drift-reports artifact)"
+          payload=$(jq -n \
+            --arg reason "$reason" \
+            --arg cluster_name "${CLUSTER_FOR_ROLLBACK}" \
+            --arg namespace "${NS_FOR_ROLLBACK}" \
+            --arg deployment_name "${DEPLOY_FOR_ROLLBACK}" \
+            '{event_type:"model_degraded", client_payload:{reason:$reason, cluster_name:$cluster_name, namespace:$namespace, deployment_name:$deployment_name}}')
+          curl -sSf -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/dispatches" \
+            -d "${payload}"
+
+      - name: Fail workflow if drift detected
+        if: steps.drift.outcome != 'success'
+        run: |
+          echo "Drift detected; rollback dispatched (if cluster was resolved)."
+          exit 1
