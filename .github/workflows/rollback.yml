@@ -7,32 +7,36 @@ on:
         description: "Reason for rollback (link to monitoring alert, etc.)"
         required: true
         type: string
+
       to_revision:
         description: "Optional: rollback to a specific revision number (leave empty to rollback to previous)"
         required: false
         type: string
+
       cluster_name:
         description: "EKS cluster name (optional override; else uses secret EKS_CLUSTER_NAME)"
         required: false
         type: string
+
       namespace:
         description: "Kubernetes namespace"
         required: true
         default: "default"
         type: string
+
       deployment_name:
         description: "Kubernetes deployment name"
         required: true
         default: "predictive-maintenance-api"
         type: string
-      # demo safety: allow end-to-end automation + teardown
+
       destroy_cluster_after_test:
         description: "Demo only: delete the EKS cluster after successful rollback verification (only pm-debug-* allowed)"
         required: true
         default: "false"
         type: choice
         options: ["true", "false"]
-      # optional: make the workflow self-heal EKS access issues
+
       bootstrap_eks_access:
         description: "If true, create/associate EKS access entry for the AWS role used by this workflow"
         required: true
@@ -101,6 +105,35 @@ jobs:
           echo "destroy=${DESTROY}" >> "$GITHUB_OUTPUT"
           echo "bootstrap=${BOOTSTRAP}" >> "$GITHUB_OUTPUT"
 
+      - name: Normalize cluster name (EKS-safe)
+        id: normalize
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          raw="${{ steps.vars.outputs.cluster }}"
+
+          # EKS cluster name must start with [A-Za-z0-9] and then [A-Za-z0-9-_]*
+          name="$(echo "$raw" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr '/_' '--' \
+            | tr -cd 'a-z0-9-')"
+
+          if [ -z "$name" ]; then
+            echo "Cluster name resolved to empty after sanitization. raw='$raw'"
+            exit 1
+          fi
+
+          if ! echo "$name" | grep -Eq '^[a-z0-9]'; then
+            name="pm-${name}"
+          fi
+
+          name="${name:0:80}"
+
+          echo "cluster_normalized=$name" >> "$GITHUB_OUTPUT"
+          echo "Using cluster (raw)        : $raw"
+          echo "Using cluster (normalized) : $name"
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -116,8 +149,14 @@ jobs:
       - name: "Preflight: cluster exists and ACTIVE"
         run: |
           set -euo pipefail
-          aws eks describe-cluster --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}" --query "cluster.status" --output text
-          aws eks wait cluster-active --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}"
+          aws eks describe-cluster \
+            --name "${{ steps.normalize.outputs.cluster_normalized }}" \
+            --region "${AWS_REGION}" \
+            --query "cluster.status" \
+            --output text
+          aws eks wait cluster-active \
+            --name "${{ steps.normalize.outputs.cluster_normalized }}" \
+            --region "${AWS_REGION}"
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -127,25 +166,21 @@ jobs:
       - name: Bootstrap EKS access entry (optional, fixes "provide credentials")
         if: steps.vars.outputs.bootstrap == 'true'
         env:
-          # If you want to grant access to a *different* role for kubectl, set this secret.
           EKS_KUBECTL_ROLE_ARN: ${{ secrets.EKS_KUBECTL_ROLE_ARN }}
           EKS_DEPLOY_ROLE_ARN: ${{ secrets.EKS_DEPLOY }}
         run: |
           set -euo pipefail
-
-          # Prefer explicit kubectl role if provided; otherwise authorize the deploy role.
           PRINCIPAL="${EKS_KUBECTL_ROLE_ARN:-${EKS_DEPLOY_ROLE_ARN}}"
           test -n "${PRINCIPAL}"
-
           echo "Bootstrapping EKS access for principal: ${PRINCIPAL}"
-          # Best-effort idempotent: create entry + attach admin policy.
+
           aws eks create-access-entry \
-            --cluster-name "${{ steps.vars.outputs.cluster }}" \
+            --cluster-name "${{ steps.normalize.outputs.cluster_normalized }}" \
             --principal-arn "${PRINCIPAL}" \
             --region "${AWS_REGION}" || true
 
           aws eks associate-access-policy \
-            --cluster-name "${{ steps.vars.outputs.cluster }}" \
+            --cluster-name "${{ steps.normalize.outputs.cluster_normalized }}" \
             --principal-arn "${PRINCIPAL}" \
             --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
             --access-scope type=cluster \
@@ -154,9 +189,8 @@ jobs:
       - name: Configure kubectl for EKS (use current AWS identity)
         run: |
           set -euo pipefail
-          aws eks update-kubeconfig --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}"
+          aws eks update-kubeconfig --name "${{ steps.normalize.outputs.cluster_normalized }}" --region "${AWS_REGION}"
 
-          # Hard auth check (fail early with actionable message)
           set +e
           kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide >/tmp/kubectl_auth_check.log 2>&1
           rc=$?
@@ -226,13 +260,16 @@ jobs:
             rollout_history_after.txt
 
       - name: "Demo cleanup (optional): delete EKS cluster"
-        if: steps.vars.outputs.destroy == 'true'
+        # Only delete after successful rollback verification
+        if: success() && steps.vars.outputs.destroy == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          CLUSTER="${{ steps.vars.outputs.cluster }}"
+          CLUSTER="${{ steps.normalize.outputs.cluster_normalized }}"
+
           if [[ "$CLUSTER" != pm-debug-* ]]; then
             echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-debug-* safety pattern."
             exit 1
           fi
+
           eksctl delete cluster --name "$CLUSTER" --region "${AWS_REGION}" --wait
