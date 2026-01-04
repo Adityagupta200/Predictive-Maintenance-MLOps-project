@@ -225,7 +225,7 @@ jobs:
             rollout_history_before.txt
             rollout_history_after.txt
 
-      - name: Demo cleanup (optional): delete EKS cluster
+      - name: "Demo cleanup (optional): delete EKS cluster"
         if: steps.vars.outputs.destroy == 'true'
         shell: bash
         run: |
