@@ -25,10 +25,18 @@ on:
         required: true
         default: "predictive-maintenance-api"
         type: string
+      # demo safety: allow end-to-end automation + teardown
       destroy_cluster_after_test:
-        description: "Demo only: delete the EKS cluster after successful rollback verification"
+        description: "Demo only: delete the EKS cluster after successful rollback verification (only pm-debug-* allowed)"
         required: true
         default: "false"
+        type: choice
+        options: ["true", "false"]
+      # optional: make the workflow self-heal EKS access issues
+      bootstrap_eks_access:
+        description: "If true, create/associate EKS access entry for the AWS role used by this workflow"
+        required: true
+        default: "true"
         type: choice
         options: ["true", "false"]
 
@@ -57,6 +65,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REASON="${{ inputs.reason }}"
             TO_REV="${{ inputs.to_revision }}"
@@ -64,13 +73,15 @@ jobs:
             NS="${{ inputs.namespace }}"
             DEPLOY="${{ inputs.deployment_name }}"
             DESTROY="${{ inputs.destroy_cluster_after_test }}"
+            BOOTSTRAP="${{ inputs.bootstrap_eks_access }}"
           else
             REASON="${{ github.event.client_payload.reason }}"
             TO_REV="${{ github.event.client_payload.to_revision }}"
             CLUSTER="${{ github.event.client_payload.cluster_name }}"
             NS="${{ github.event.client_payload.namespace }}"
             DEPLOY="${{ github.event.client_payload.deployment_name }}"
-            DESTROY="false"
+            DESTROY="${{ github.event.client_payload.destroy_cluster_after_test || 'false' }}"
+            BOOTSTRAP="${{ github.event.client_payload.bootstrap_eks_access || 'false' }}"
           fi
 
           if [ -z "${CLUSTER:-}" ]; then
@@ -88,6 +99,7 @@ jobs:
           echo "namespace=${NS}" >> "$GITHUB_OUTPUT"
           echo "deploy=${DEPLOY}" >> "$GITHUB_OUTPUT"
           echo "destroy=${DESTROY}" >> "$GITHUB_OUTPUT"
+          echo "bootstrap=${BOOTSTRAP}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -101,40 +113,48 @@ jobs:
           set -euo pipefail
           aws sts get-caller-identity
 
-      - name: "Preflight: cluster exists and ACTIVE"
+      - name: Preflight: cluster exists and ACTIVE
         run: |
           set -euo pipefail
-          aws eks describe-cluster \
-            --name "${{ steps.vars.outputs.cluster }}" \
-            --region "${AWS_REGION}" \
-            --query "cluster.status" --output text
-          aws eks wait cluster-active \
-            --name "${{ steps.vars.outputs.cluster }}" \
-            --region "${AWS_REGION}"
-            
+          aws eks describe-cluster --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}" --query "cluster.status" --output text
+          aws eks wait cluster-active --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}"
+
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: "v1.30.0"
 
-      - name: Configure kubectl for EKS (with access role + auth check)
+      - name: Bootstrap EKS access entry (optional, fixes "provide credentials")
+        if: steps.vars.outputs.bootstrap == 'true'
         env:
+          # If you want to grant access to a *different* role for kubectl, set this secret.
           EKS_KUBECTL_ROLE_ARN: ${{ secrets.EKS_KUBECTL_ROLE_ARN }}
+          EKS_DEPLOY_ROLE_ARN: ${{ secrets.EKS_DEPLOY }}
         run: |
           set -euo pipefail
 
-          ROLE_ARGS=""
-          if [ -n "${EKS_KUBECTL_ROLE_ARN:-}" ]; then
-            echo "Using EKS_KUBECTL_ROLE_ARN for kubectl auth"
-            ROLE_ARGS="--role-arn ${EKS_KUBECTL_ROLE_ARN}"
-          else
-            echo "EKS_KUBECTL_ROLE_ARN not set; using current AWS identity for kubectl auth"
-          fi
+          # Prefer explicit kubectl role if provided; otherwise authorize the deploy role.
+          PRINCIPAL="${EKS_KUBECTL_ROLE_ARN:-${EKS_DEPLOY_ROLE_ARN}}"
+          test -n "${PRINCIPAL}"
 
-          aws eks update-kubeconfig \
-            --name "${{ steps.vars.outputs.cluster }}" \
-            --region "${AWS_REGION}" \
-            ${ROLE_ARGS}
+          echo "Bootstrapping EKS access for principal: ${PRINCIPAL}"
+          # Best-effort idempotent: create entry + attach admin policy.
+          aws eks create-access-entry \
+            --cluster-name "${{ steps.vars.outputs.cluster }}" \
+            --principal-arn "${PRINCIPAL}" \
+            --region "${AWS_REGION}" || true
+
+          aws eks associate-access-policy \
+            --cluster-name "${{ steps.vars.outputs.cluster }}" \
+            --principal-arn "${PRINCIPAL}" \
+            --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+            --access-scope type=cluster \
+            --region "${AWS_REGION}" || true
+
+      - name: Configure kubectl for EKS (use current AWS identity)
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}"
 
           # Hard auth check (fail early with actionable message)
           set +e
@@ -146,9 +166,9 @@ jobs:
             echo "kubectl auth check failed. Output:"
             cat /tmp/kubectl_auth_check.log || true
             echo ""
-            echo "Likely cause: the role used for kubectl is not authorized in the EKS cluster (aws-auth / access entries)."
-            echo "Fix: set secret EKS_KUBECTL_ROLE_ARN to a role that is authorized in the cluster,"
-            echo "or update cluster RBAC to authorize the GitHub Actions role."
+            echo "Fix options:"
+            echo "1) Keep bootstrap_eks_access=true (recommended for demo)."
+            echo "2) Or authorize the workflow role in EKS (Access Entry / aws-auth)."
             exit 1
           fi
 
@@ -174,6 +194,7 @@ jobs:
           set -euo pipefail
           kubectl -n "${{ steps.vars.outputs.namespace }}" port-forward deployment/"${{ steps.vars.outputs.deploy }}" 18000:8000 >/tmp/pf.log 2>&1 &
           PF_PID=$!
+
           for i in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:18000/health" >/dev/null; then
               echo "Health OK after rollback"
@@ -182,6 +203,7 @@ jobs:
             fi
             sleep 2
           done
+
           echo "Health check failed after rollback; pf logs:"
           tail -n 200 /tmp/pf.log || true
           kill "${PF_PID}" || true
@@ -203,7 +225,7 @@ jobs:
             rollout_history_before.txt
             rollout_history_after.txt
 
-      - name: "Demo cleanup (optional): delete EKS cluster"
+      - name: Demo cleanup (optional): delete EKS cluster
         if: steps.vars.outputs.destroy == 'true'
         shell: bash
         run: |

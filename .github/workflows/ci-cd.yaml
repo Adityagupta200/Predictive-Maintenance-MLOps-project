@@ -197,6 +197,7 @@ jobs:
         with:
           name: post-deploy-data
           path: |
+            artifacts/processed/train.csv
             artifacts/processed/val.csv
             artifacts/processed/meta_features.json
           if-no-files-found: error
@@ -276,6 +277,7 @@ jobs:
         with:
           name: post-deploy-data
           path: |
+            artifacts/processed/train.csv
             artifacts/processed/val.csv
             artifacts/processed/meta_features.json
           if-no-files-found: error
