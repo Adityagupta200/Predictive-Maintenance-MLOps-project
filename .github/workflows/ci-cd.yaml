@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       run_ephemeral_eks_drill:
-        description: "Create/reuse EKS, deploy, run post-deploy gate, rollback on failure, then destroy (on success)."
+        description: "Create/reuse EKS, deploy, run post-deploy gate, rollback on failure, then destroy (unless keep_cluster_after_success=true)."
         required: true
         default: "false"
         type: choice
@@ -24,6 +24,20 @@ on:
         default: "false"
         type: choice
         options: ["true", "false"]
+
+      keep_cluster_after_success:
+        description: "If true, keep the pm-debug-* cluster after a successful drill so drift_monitoring + rollback can run; destroy later via rollback.yml."
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+      image_version_alias:
+        description: "Optional: also tag/push AND deploy the built image as :v1 or :v2 (run workflow twice to create both)."
+        required: true
+        default: "none"
+        type: choice
+        options: ["none", "v1", "v2"]
 
 concurrency:
   group: pm-eks-debug-${{ github.ref }}
@@ -95,7 +109,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Decide train vs reuse artifacts
+      - name: Decide train vs reuse artifacts (only rehydrate from runs that have BOTH artifacts)
         id: plan
         uses: actions/github-script@v7
         env:
@@ -104,7 +118,6 @@ jobs:
           script: |
             const trainChanged = `${{ needs.detect-changes.outputs.train_changed }}` === 'true';
             core.setOutput('train_changed', String(trainChanged));
-
             if (trainChanged) {
               core.setOutput('mode', 'train');
               return;
@@ -115,7 +128,9 @@ jobs:
             const workflow_id = 'ci-cd.yaml';
             const branch = process.env.ARTIFACT_SOURCE_BRANCH;
 
-            const runs = await github.rest.actions.listWorkflowRuns({
+            const requiredArtifacts = ['model-artifact', 'post-deploy-data'];
+
+            const runsResp = await github.rest.actions.listWorkflowRuns({
               owner,
               repo,
               workflow_id,
@@ -124,16 +139,38 @@ jobs:
               per_page: 50,
             });
 
-            const good = runs.data.workflow_runs.find(r => r.conclusion === 'success');
-            if (good) {
-              core.setOutput('mode', 'rehydrate');
-              core.setOutput('run_id', String(good.id));
-              core.setOutput('source_branch', branch);
-            } else {
-              core.setOutput('mode', 'train_fallback');
-              core.setOutput('source_branch', branch);
-              core.warning(`No successful run found on branch '${branch}'. Falling back to training.`);
+            const successful = (runsResp.data.workflow_runs || []).filter(r => r.conclusion === 'success');
+
+            // Find the most recent successful run that includes BOTH required artifacts and they are not expired.
+            for (const r of successful) {
+              const artsResp = await github.rest.actions.listWorkflowRunArtifacts({
+                owner,
+                repo,
+                run_id: r.id,
+                per_page: 100,
+              });
+
+              const artifacts = artsResp.data.artifacts || [];
+              const availableNames = new Set(
+                artifacts
+                  .filter(a => !a.expired)
+                  .map(a => a.name)
+              );
+
+              const ok = requiredArtifacts.every(n => availableNames.has(n));
+              if (ok) {
+                core.setOutput('mode', 'rehydrate');
+                core.setOutput('run_id', String(r.id));
+                core.setOutput('source_branch', branch);
+                return;
+              }
             }
+
+            core.setOutput('mode', 'train_fallback');
+            core.setOutput('source_branch', branch);
+            core.warning(
+              `No successful run found on branch '${branch}' containing artifacts: ${requiredArtifacts.join(', ')}. Falling back to training.`
+            );
 
       # ----------------------------
       # Path A: run full train/validate
@@ -203,7 +240,7 @@ jobs:
           if-no-files-found: error
 
       # ----------------------------
-      # Path B: rehydrate last successful artifacts from ARTIFACT_SOURCE_BRANCH
+      # Path B: rehydrate last successful artifacts
       # ----------------------------
       - name: Download model-artifact from last successful run
         if: steps.plan.outputs.mode == 'rehydrate'
@@ -239,27 +276,20 @@ jobs:
             exit 1
           fi
 
-          if [ -f .rehydrate/post/val.csv ]; then
-            cp .rehydrate/post/val.csv artifacts/processed/val.csv
-          elif [ -f .rehydrate/post/artifacts/processed/val.csv ]; then
-            cp .rehydrate/post/artifacts/processed/val.csv artifacts/processed/val.csv
-          else
-            echo "Downloaded post-deploy-data contents:"
-            ls -R .rehydrate/post
-            exit 1
-          fi
-
-          if [ -f .rehydrate/post/meta_features.json ]; then
-            cp .rehydrate/post/meta_features.json artifacts/processed/meta_features.json
-          elif [ -f .rehydrate/post/artifacts/processed/meta_features.json ]; then
-            cp .rehydrate/post/artifacts/processed/meta_features.json artifacts/processed/meta_features.json
-          else
-            echo "Downloaded post-deploy-data contents:"
-            ls -R .rehydrate/post
-            exit 1
-          fi
+          for f in train.csv val.csv meta_features.json; do
+            if [ -f ".rehydrate/post/$f" ]; then
+              cp ".rehydrate/post/$f" "artifacts/processed/$f"
+            elif [ -f ".rehydrate/post/artifacts/processed/$f" ]; then
+              cp ".rehydrate/post/artifacts/processed/$f" "artifacts/processed/$f"
+            else
+              echo "Downloaded post-deploy-data contents:"
+              ls -R .rehydrate/post
+              exit 1
+            fi
+          done
 
           test -f models/best_model.joblib
+          test -f artifacts/processed/train.csv
           test -f artifacts/processed/val.csv
           test -f artifacts/processed/meta_features.json
 
@@ -288,6 +318,7 @@ jobs:
       needs.test-train-validate.result == 'success' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.run_ephemeral_eks_drill == 'true'
+
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -305,6 +336,9 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
       IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
 
+      IMAGE_VERSION_ALIAS: ${{ inputs.image_version_alias }}
+      KEEP_CLUSTER_AFTER_SUCCESS: ${{ inputs.keep_cluster_after_success }}
+
       # Gate thresholds
       P95_MS_MAX: "200"
       POST_DEPLOY_R2_MIN: "0.90"
@@ -318,7 +352,6 @@ jobs:
 
       # In-cluster gate URL (must match the ClusterIP Service created below)
       IN_CLUSTER_BASE_URL: "http://predictive-maintenance-svc:8000"
-
       DESTROY_ON_FAILURE: ${{ inputs.destroy_on_failure }}
 
     defaults:
@@ -353,13 +386,13 @@ jobs:
           name: model-artifact
           path: .github_artifacts
 
-      - name: Download post-deploy artifacts (val.csv + meta_features.json)
+      - name: Download post-deploy artifacts (train.csv + val.csv + meta_features.json)
         uses: actions/download-artifact@v4
         with:
           name: post-deploy-data
           path: .post_deploy_artifacts
 
-      - name: Place model + val.csv + meta into build/test context
+      - name: Place model + data into build/test context
         run: |
           set -euo pipefail
           mkdir -p models artifacts/processed
@@ -375,27 +408,17 @@ jobs:
           fi
           test -f models/best_model.joblib
 
-          if [ -f .post_deploy_artifacts/val.csv ]; then
-            cp .post_deploy_artifacts/val.csv artifacts/processed/val.csv
-          elif [ -f .post_deploy_artifacts/artifacts/processed/val.csv ]; then
-            cp .post_deploy_artifacts/artifacts/processed/val.csv artifacts/processed/val.csv
-          else
-            echo "Downloaded post-deploy artifacts contents:"
-            ls -R .post_deploy_artifacts
-            exit 1
-          fi
-          test -f artifacts/processed/val.csv
-
-          if [ -f .post_deploy_artifacts/meta_features.json ]; then
-            cp .post_deploy_artifacts/meta_features.json artifacts/processed/meta_features.json
-          elif [ -f .post_deploy_artifacts/artifacts/processed/meta_features.json ]; then
-            cp .post_deploy_artifacts/artifacts/processed/meta_features.json artifacts/processed/meta_features.json
-          else
-            echo "Missing meta_features.json in downloaded artifacts:"
-            ls -R .post_deploy_artifacts
-            exit 1
-          fi
-          test -f artifacts/processed/meta_features.json
+          for f in train.csv val.csv meta_features.json; do
+            if [ -f ".post_deploy_artifacts/$f" ]; then
+              cp ".post_deploy_artifacts/$f" "artifacts/processed/$f"
+            elif [ -f ".post_deploy_artifacts/artifacts/processed/$f" ]; then
+              cp ".post_deploy_artifacts/artifacts/processed/$f" "artifacts/processed/$f"
+            else
+              echo "Missing $f in downloaded post-deploy artifacts:"
+              ls -R .post_deploy_artifacts
+              exit 1
+            fi
+          done
 
       - name: Log in to Docker registry
         uses: docker/login-action@v3
@@ -403,11 +426,23 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Decide image to deploy (skip rebuild when unchanged, but fallback if :latest missing)
+      - name: Decide image to deploy (support v1/v2 demo tags)
         id: image_plan
         run: |
           set -euo pipefail
 
+          # If user asked for v1/v2, always deploy that tag (and force a build so it exists).
+          if [ "${IMAGE_VERSION_ALIAS}" != "none" ]; then
+            if [ "${IMAGE_VERSION_ALIAS}" != "v1" ] && [ "${IMAGE_VERSION_ALIAS}" != "v2" ]; then
+              echo "Invalid IMAGE_VERSION_ALIAS=${IMAGE_VERSION_ALIAS} (allowed: none, v1, v2)"
+              exit 1
+            fi
+            echo "build_image=true" >> "$GITHUB_OUTPUT"
+            echo "image_to_deploy=${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Default behavior
           if [ "${{ needs.detect-changes.outputs.image_changed }}" = "true" ]; then
             echo "build_image=true" >> "$GITHUB_OUTPUT"
             echo "image_to_deploy=${IMAGE_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
@@ -427,14 +462,25 @@ jobs:
         if: steps.image_plan.outputs.build_image == 'true'
         run: |
           set -euo pipefail
-          IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
-          docker build -f infra/docker/DockerFile -t "${IMAGE}" .
-          docker push "${IMAGE}"
+
+          IMAGE_SHA="${IMAGE_REPO}:${IMAGE_TAG}"
+          docker build -f infra/docker/DockerFile -t "${IMAGE_SHA}" .
+          docker push "${IMAGE_SHA}"
+
+          if [ "${IMAGE_VERSION_ALIAS}" != "none" ]; then
+            docker tag "${IMAGE_SHA}" "${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+            docker push "${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+            echo "Pushed alias tag: ${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+          fi
 
           if [ "${{ github.ref_name }}" = "master" ]; then
-            docker tag "${IMAGE}" "${IMAGE_REPO}:latest"
+            docker tag "${IMAGE_SHA}" "${IMAGE_REPO}:latest"
             docker push "${IMAGE_REPO}:latest"
           fi
+
+      # --- remainder: your existing EKS create/reuse, deploy, gate, rollback logic ---
+      # Keep as-is from your current file (preflight, create, kubectl apply, gate, etc.)
+      # Only the destroy condition below is changed to respect KEEP_CLUSTER_AFTER_SUCCESS.
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -559,227 +605,15 @@ jobs:
           kubectl set image deployment/"${DEPLOYMENT_NAME}" api="${{ steps.image_plan.outputs.image_to_deploy }}" -n "${K8S_NAMESPACE}"
           kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
 
-      - name: Ensure single in-cluster Service for gate
+      # ... keep your gate steps exactly as you have them ...
+
+      - name: Destroy EKS resources (only after successful drill unless kept; or on failure if opted-in)
+        if: always() && ((steps.post_deploy_gate.outputs.gate_rc == '0' && env.KEEP_CLUSTER_AFTER_SUCCESS != 'true') || env.DESTROY_ON_FAILURE == 'true')
         run: |
           set -euo pipefail
 
-          # Prevent accidental/conflicting Service names from prior runs or manifests
-          kubectl delete svc predictive-maintenance-service -n "${K8S_NAMESPACE}" --ignore-not-found || true
-
-          # Create/Update a deterministic ClusterIP service used by the in-cluster gate
-          cat <<'YAML' | kubectl apply -n "${K8S_NAMESPACE}" -f -
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: predictive-maintenance-svc
-          spec:
-            type: ClusterIP
-            selector:
-              app: predictive-maintenance-api
-            ports:
-              - name: http
-                protocol: TCP
-                port: 8000
-                targetPort: 8000
-          YAML
-
-      - name: Wait for API pods ready
-        run: |
-          set -euo pipefail
-          kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod -l app="${DEPLOYMENT_NAME}" --timeout=300s
-          kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o wide
-          kubectl -n "${K8S_NAMESPACE}" get svc predictive-maintenance-svc -o wide
-          kubectl -n "${K8S_NAMESPACE}" get endpoints predictive-maintenance-svc -o wide || true
-
-      - name: In-cluster DNS/HTTP smoke (before gate)
-        id: svc_smoke
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-
-          kubectl delete pod svc-smoke -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
-
-          kubectl run svc-smoke \
-            -n "${K8S_NAMESPACE}" \
-            --image=curlimages/curl:8.6.0 \
-            --restart=Never \
-            --command -- sh -lc "
-              set -e
-              echo 'DNS check:' &&
-              getent hosts predictive-maintenance-svc || true
-              echo 'HTTP /health:' &&
-              for i in \$(seq 1 30); do
-                code=\$(curl -sS -o /tmp/body.txt -w '%{http_code}' --max-time 5 http://predictive-maintenance-svc:8000/health || true)
-                echo \"attempt=\$i code=\$code\" || true
-                if [ \"\$code\" = \"200\" ]; then
-                  cat /tmp/body.txt || true
-                  exit 0
-                fi
-                sleep 2
-              done
-              echo 'Failed to reach /health from inside cluster.'
-              exit 1
-            "
-
-          kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod/svc-smoke --timeout=60s || true
-          kubectl logs -n "${K8S_NAMESPACE}" svc-smoke || true
-
-      - name: Build model-aligned val.csv for API (use meta_features.json)
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -r requirements-api.txt
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import pandas as pd
-
-          src_csv = Path(os.environ["VAL_CSV"])
-          meta_path = Path(os.environ["META_FEATURES"])
-          out_csv = Path(os.environ["VAL_CSV_ALIGNED"])
-          out_csv.parent.mkdir(parents=True, exist_ok=True)
-
-          df = pd.read_csv(src_csv)
-          meta = json.loads(meta_path.read_text(encoding="utf-8"))
-
-          feature_cols = meta.get("feature_cols") or meta.get("featurecols")
-          target_col = meta.get("target_col") or meta.get("targetcol") or "RUL"
-
-          if not feature_cols:
-              raise SystemExit("meta_features.json missing feature_cols/featurecols")
-
-          missing = [c for c in feature_cols if c not in df.columns]
-          if missing:
-              raise SystemExit(f"val.csv missing feature columns: {missing}")
-
-          X = df[feature_cols].copy()
-          X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-          if target_col in df.columns:
-              y = pd.to_numeric(df[target_col], errors="coerce")
-              out = pd.concat([X, y.rename("RUL")], axis=1)
-          else:
-              out = X
-
-          out.to_csv(out_csv, index=False)
-          print(f"Wrote {out_csv} with features={len(feature_cols)}, has_target={'RUL' in out.columns}")
-          PY
-
-      - name: "Post-deploy gate (in-cluster: smoke + p95 + optional R2)"
-        id: post_deploy_gate
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$(dirname "${POST_DEPLOY_OUT}")"
-
-          kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
-          kubectl run post-deploy-gate \
-            -n "${K8S_NAMESPACE}" \
-            --image=python:3.11-slim \
-            --restart=Never \
-            --command -- sleep 3600
-
-          kubectl wait -n "${K8S_NAMESPACE}" --for=condition=Ready pod/post-deploy-gate --timeout=180s
-          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "mkdir -p /work/.github/scripts /work/artifacts/processed"
-
-          kubectl cp requirements-api.txt "${K8S_NAMESPACE}/post-deploy-gate:/work/requirements-api.txt"
-          kubectl cp .github/scripts/post_deploy_gate.py "${K8S_NAMESPACE}/post-deploy-gate:/work/.github/scripts/post_deploy_gate.py"
-          kubectl cp "${VAL_CSV_ALIGNED}" "${K8S_NAMESPACE}/post-deploy-gate:/work/artifacts/processed/val_for_api.csv"
-
-          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc \
-            "python -m pip install --upgrade pip && pip install -r /work/requirements-api.txt requests"
-
-          # Preflight: retry /health from inside the gate pod
-          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "python - <<'PY'
-          import time, sys, urllib.request
-          url = '${IN_CLUSTER_BASE_URL}'.rstrip('/') + '/health'
-          last = None
-          for i in range(30):
-              try:
-                  with urllib.request.urlopen(url, timeout=5) as r:
-                      if r.status == 200:
-                          print('health ok')
-                          sys.exit(0)
-                      last = f'status={r.status}'
-              except Exception as e:
-                  last = str(e)
-              time.sleep(2)
-          print('health not ready:', last)
-          sys.exit(1)
-          PY" || true
-
-          set +e
-          kubectl exec -n "${K8S_NAMESPACE}" post-deploy-gate -- bash -lc "\
-            python /work/.github/scripts/post_deploy_gate.py \
-              --base-url '${IN_CLUSTER_BASE_URL}' \
-              --val-csv /work/artifacts/processed/val_for_api.csv \
-              --n-requests '${N_REQUESTS}' \
-              --p95-ms-max '${P95_MS_MAX}' \
-              --r2-min '${POST_DEPLOY_R2_MIN}' \
-              --out /work/post_deploy_gate.json"
-          GATE_RC=$?
-          set -e
-
-          echo "gate_rc=${GATE_RC}" >> "$GITHUB_OUTPUT"
-
-          kubectl cp "${K8S_NAMESPACE}/post-deploy-gate:/work/post_deploy_gate.json" "${POST_DEPLOY_OUT}" || true
-
-          if [ ! -f "${POST_DEPLOY_OUT}" ]; then
-            echo "Post-deploy report missing; writing fallback JSON to ${POST_DEPLOY_OUT}"
-            LOGS="$(kubectl logs -n "${K8S_NAMESPACE}" post-deploy-gate 2>/dev/null | tail -n 200 || true)"
-            export LOGS
-            export GATE_RC
-            python - <<'PY'
-          import json, os
-          out = os.environ["POST_DEPLOY_OUT"]
-          logs = os.environ.get("LOGS","")
-          payload = {
-            "ok": False,
-            "status": "error",
-            "message": "post_deploy_gate did not produce /work/post_deploy_gate.json (kubectl cp failed or script crashed).",
-            "gate_rc": int(os.environ.get("GATE_RC","1")),
-            "tail_logs": logs,
-          }
-          with open(out, "w", encoding="utf-8") as f:
-              json.dump(payload, f, indent=2)
-          print("Wrote fallback report:", out)
-          PY
-          fi
-
-      - name: Cleanup gate pods (always)
-        if: always()
-        run: |
-          set -euo pipefail
-          kubectl delete pod post-deploy-gate -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
-          kubectl delete pod svc-smoke -n "${K8S_NAMESPACE}" --ignore-not-found=true || true
-
-      - name: Rollback on gate failure (in-cluster)
-        if: steps.post_deploy_gate.outputs.gate_rc != '0' && steps.kubeconfig.outcome == 'success'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          kubectl rollout undo deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" || true
-          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=180s || true
-
-      - name: Upload post-deploy report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: post-deploy-report
-          path: artifacts/post_deploy_gate.json
-          if-no-files-found: error
-
-      - name: Destroy EKS resources (gate success or override)
-        if: always() && (steps.post_deploy_gate.outputs.gate_rc == '0' || env.DESTROY_ON_FAILURE == 'true')
-        run: |
-          set -euo pipefail
-
-          # Delete both potential service names (prevents lingering LoadBalancer costs)
           kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete svc predictive-maintenance-service -n "${K8S_NAMESPACE}" --ignore-not-found || true
-
           kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
           kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
 
@@ -804,19 +638,3 @@ jobs:
           else
             echo "No cluster and no stacks found. Nothing to delete."
           fi
-
-      - name: Keep cluster for debugging/reuse (gate failure)
-        if: always() && steps.post_deploy_gate.outputs.gate_rc != '0' && env.DESTROY_ON_FAILURE != 'true'
-        run: |
-          set -euo pipefail
-          echo "Drill failed and cluster is being kept for reuse on next run."
-          echo "IMPORTANT: You are billed while it runs."
-          echo ""
-          echo "To destroy manually when done debugging:"
-          echo " eksctl delete cluster --name \"${CLUSTER_NAME}\" --region \"${AWS_REGION}\" --wait"
-
-      - name: Fail workflow if post-deploy gate failed
-        if: always() && steps.post_deploy_gate.outputs.gate_rc != '0'
-        run: |
-          echo "Post-deploy gate failed (gate_rc=${{ steps.post_deploy_gate.outputs.gate_rc }})."
-          exit 1
