@@ -18,7 +18,7 @@ on:
         default: "predictive-maintenance-api"
         type: string
       simulate_drift:
-        description: "For demo/testing: create a drifted 'current' dataset to force PSI breach"
+        description: "For demo/testing: create drifted current dataset to force PSI breach"
         required: true
         default: "true"
         type: choice
@@ -28,25 +28,78 @@ on:
         required: true
         default: "0.2"
         type: string
-  # schedule:
-  #   - cron: "0 3 * * *"
- 
+      destroy_cluster_after_test:
+        description: "Demo only: after rollback, delete EKS cluster (only pm-debug-* allowed in rollback.yml)"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      bootstrap_eks_access:
+        description: "Let rollback workflow auto-fix EKS access (recommended for demo)"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
 permissions:
-  contents: write
-  actions: write
+  contents: read
+  actions: read
 
 jobs:
   drift-check:
     runs-on: ubuntu-latest
     env:
-      DRIFT_PSI_THRESHOLD: ${{ github.event_name == 'workflow_dispatch' && inputs.psi_threshold || '0.2' }}
-      SIMULATE_DRIFT: ${{ github.event_name == 'workflow_dispatch' && inputs.simulate_drift || 'false' }}
-      CLUSTER_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.cluster_name || secrets.EKS_CLUSTER_NAME }}
-      NS_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.namespace || 'default' }}
-      DEPLOY_FOR_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.deployment_name || 'predictive-maintenance-api' }}
+      DRIFT_PSI_THRESHOLD: ${{ inputs.psi_threshold }}
+      SIMULATE_DRIFT: ${{ inputs.simulate_drift }}
+      CLUSTER_FOR_ROLLBACK: ${{ inputs.cluster_name != '' && inputs.cluster_name || secrets.EKS_CLUSTER_NAME }}
+      NS_FOR_ROLLBACK: ${{ inputs.namespace }}
+      DEPLOY_FOR_ROLLBACK: ${{ inputs.deployment_name }}
+      DESTROY_AFTER: ${{ inputs.destroy_cluster_after_test }}
+      BOOTSTRAP: ${{ inputs.bootstrap_eks_access }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Find latest successful ci-cd run (this branch)
+        id: findrun
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflow_id = 'ci-cd.yaml';
+            const branch = context.ref.replace('refs/heads/', '');
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id, branch, status: 'completed', per_page: 50
+            });
+            const good = runs.data.workflow_runs.find(r => r.conclusion === 'success');
+            if (!good) core.setFailed(`No successful ${workflow_id} run found on branch ${branch}`);
+            core.setOutput('run_id', String(good.id));
+
+      - name: Download post-deploy-data (train/val/meta) from that run
+        uses: actions/download-artifact@v4
+        with:
+          name: post-deploy-data
+          run-id: ${{ steps.findrun.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .post_deploy_data
+
+      - name: Place train/val into artifacts/processed
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/processed
+          # handle either layout (artifact root or nested artifacts/processed)
+          if [ -f .post_deploy_data/train.csv ]; then
+            cp .post_deploy_data/train.csv artifacts/processed/train.csv
+          else
+            cp .post_deploy_data/artifacts/processed/train.csv artifacts/processed/train.csv
+          fi
+
+          if [ -f .post_deploy_data/val.csv ]; then
+            cp .post_deploy_data/val.csv artifacts/processed/val.csv
+          else
+            cp .post_deploy_data/artifacts/processed/val.csv artifacts/processed/val.csv
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -80,12 +133,10 @@ jobs:
 
           df = pd.read_csv(cur)
           simulate = (os.getenv("SIMULATE_DRIFT","false").lower() == "true")
-
           if simulate:
             num = df.select_dtypes(include=[np.number]).columns
             for c in num:
               df[c] = df[c] * 3.0 + 50.0
-
           df.to_csv(out, index=False)
           print("Wrote:", out, "simulate_drift=", simulate)
           PY
@@ -120,7 +171,18 @@ jobs:
             --arg cluster_name "${CLUSTER_FOR_ROLLBACK}" \
             --arg namespace "${NS_FOR_ROLLBACK}" \
             --arg deployment_name "${DEPLOY_FOR_ROLLBACK}" \
-            '{event_type:"model_degraded", client_payload:{reason:$reason, cluster_name:$cluster_name, namespace:$namespace, deployment_name:$deployment_name}}')
+            --arg destroy_cluster_after_test "${DESTROY_AFTER}" \
+            --arg bootstrap_eks_access "${BOOTSTRAP}" \
+            '{event_type:"model_degraded",
+              client_payload:{
+                reason:$reason,
+                cluster_name:$cluster_name,
+                namespace:$namespace,
+                deployment_name:$deployment_name,
+                destroy_cluster_after_test:$destroy_cluster_after_test,
+                bootstrap_eks_access:$bootstrap_eks_access
+              }
+            }')
           curl -sSf -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -130,5 +192,5 @@ jobs:
       - name: Fail workflow if drift detected
         if: steps.drift.outcome != 'success'
         run: |
-          echo "Drift detected; rollback dispatched (if cluster was resolved)."
+          echo "Drift detected; rollback dispatched."
           exit 1
