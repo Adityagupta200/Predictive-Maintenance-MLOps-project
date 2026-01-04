@@ -51,32 +51,93 @@ jobs:
     env:
       DRIFT_PSI_THRESHOLD: ${{ inputs.psi_threshold }}
       SIMULATE_DRIFT: ${{ inputs.simulate_drift }}
+
+      # Rollback target
       CLUSTER_FOR_ROLLBACK: ${{ inputs.cluster_name != '' && inputs.cluster_name || secrets.EKS_CLUSTER_NAME }}
       NS_FOR_ROLLBACK: ${{ inputs.namespace }}
       DEPLOY_FOR_ROLLBACK: ${{ inputs.deployment_name }}
+
+      # Pass-through flags to rollback workflow
       DESTROY_AFTER: ${{ inputs.destroy_cluster_after_test }}
       BOOTSTRAP: ${{ inputs.bootstrap_eks_access }}
+
+      # Artifact name to fetch from ci-cd.yaml
+      REQUIRED_ARTIFACT: post-deploy-data
+
+      # Fallback branch where ci-cd often runs in this repo
+      FALLBACK_ARTIFACT_BRANCH: ci-pr-test
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find latest successful ci-cd run (this branch)
+      - name: Find latest ci-cd run that has post-deploy-data (current branch, then ci-pr-test)
         id: findrun
         uses: actions/github-script@v7
+        env:
+          REQUIRED_ARTIFACT: ${{ env.REQUIRED_ARTIFACT }}
+          FALLBACK_ARTIFACT_BRANCH: ${{ env.FALLBACK_ARTIFACT_BRANCH }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const workflow_id = 'ci-cd.yaml';
-            const branch = context.ref.replace('refs/heads/', '');
-            const runs = await github.rest.actions.listWorkflowRuns({
-              owner, repo, workflow_id, branch, status: 'completed', per_page: 50
-            });
-            const good = runs.data.workflow_runs.find(r => r.conclusion === 'success');
-            if (!good) core.setFailed(`No successful ${workflow_id} run found on branch ${branch}`);
-            core.setOutput('run_id', String(good.id));
+            const requiredArtifact = process.env.REQUIRED_ARTIFACT || 'post-deploy-data';
 
-      - name: Download post-deploy-data (train/val/meta) from that run
+            const currentBranch = (context.ref || '').replace('refs/heads/', '');
+            const fallbackBranch = process.env.FALLBACK_ARTIFACT_BRANCH || 'ci-pr-test';
+
+            // Search current branch first, then fallback.
+            const branches = [currentBranch, fallbackBranch].filter(Boolean);
+            const uniqueBranches = [...new Set(branches)];
+
+            core.info(`Searching ci-cd runs for artifact '${requiredArtifact}' on branches: ${uniqueBranches.join(', ')}`);
+
+            async function findRunOnBranch(branch) {
+              const runsResp = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id,
+                branch,
+                status: 'completed',
+                per_page: 100,
+              });
+
+              const successful = (runsResp.data.workflow_runs || []).filter(r => r.conclusion === 'success');
+              core.info(`Branch '${branch}': found ${successful.length} successful ci-cd runs (checking artifacts...)`);
+
+              for (const r of successful) {
+                const artsResp = await github.rest.actions.listWorkflowRunArtifacts({
+                  owner,
+                  repo,
+                  run_id: r.id,
+                  per_page: 100,
+                });
+                const names = (artsResp.data.artifacts || []).map(a => a.name);
+
+                if (names.includes(requiredArtifact)) {
+                  return r;
+                }
+              }
+              return null;
+            }
+
+            for (const br of uniqueBranches) {
+              const run = await findRunOnBranch(br);
+              if (run) {
+                core.info(`Selected run_id=${run.id} on branch='${br}' (artifact '${requiredArtifact}' exists).`);
+                core.setOutput('run_id', String(run.id));
+                core.setOutput('source_branch', br);
+                return;
+              }
+            }
+
+            core.setFailed(
+              `No successful '${workflow_id}' run found on branches [${uniqueBranches.join(', ')}] ` +
+              `that contains artifact '${requiredArtifact}'. ` +
+              `Run ci-cd successfully on '${fallbackBranch}' (or the branch you dispatch from) to publish '${requiredArtifact}'.`
+            );
+
+      - name: Download post-deploy-data (train/val/meta) from selected run
         uses: actions/download-artifact@v4
         with:
           name: post-deploy-data
@@ -88,6 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/processed
+
           # handle either layout (artifact root or nested artifacts/processed)
           if [ -f .post_deploy_data/train.csv ]; then
             cp .post_deploy_data/train.csv artifacts/processed/train.csv
@@ -100,6 +162,16 @@ jobs:
           else
             cp .post_deploy_data/artifacts/processed/val.csv artifacts/processed/val.csv
           fi
+
+          if [ -f .post_deploy_data/meta_features.json ]; then
+            cp .post_deploy_data/meta_features.json artifacts/processed/meta_features.json
+          else
+            cp .post_deploy_data/artifacts/processed/meta_features.json artifacts/processed/meta_features.json
+          fi
+
+          test -f artifacts/processed/train.csv
+          test -f artifacts/processed/val.csv
+          test -f artifacts/processed/meta_features.json
 
       - uses: actions/setup-python@v5
         with:
@@ -133,10 +205,12 @@ jobs:
 
           df = pd.read_csv(cur)
           simulate = (os.getenv("SIMULATE_DRIFT","false").lower() == "true")
+
           if simulate:
-            num = df.select_dtypes(include=[np.number]).columns
-            for c in num:
-              df[c] = df[c] * 3.0 + 50.0
+              num = df.select_dtypes(include=[np.number]).columns
+              for c in num:
+                  df[c] = df[c] * 3.0 + 50.0
+
           df.to_csv(out, index=False)
           print("Wrote:", out, "simulate_drift=", simulate)
           PY
@@ -181,8 +255,8 @@ jobs:
                 deployment_name:$deployment_name,
                 destroy_cluster_after_test:$destroy_cluster_after_test,
                 bootstrap_eks_access:$bootstrap_eks_access
-              }
-            }')
+              }}')
+
           curl -sSf -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
