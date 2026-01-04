@@ -225,7 +225,7 @@ jobs:
             --current reports/current_for_drift_check.csv \
             --out_dir reports
 
-      - name: Upload drift reports
+      - name: "Upload drift reports"
         if: always()
         uses: actions/upload-artifact@v4
         with:
