@@ -231,8 +231,8 @@ jobs:
         run: |
           set -euo pipefail
           CLUSTER="${{ steps.vars.outputs.cluster }}"
-          if [[ "$CLUSTER" != pm-debug-* ]]; then
-            echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-debug-* safety pattern."
+          if [[ "$CLUSTER" != pm-* ]]; then
+            echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-* safety pattern."
             exit 1
           fi
           eksctl delete cluster --name "$CLUSTER" --region "${AWS_REGION}" --wait
