@@ -7,36 +7,30 @@ on:
         description: "Reason for rollback (link to monitoring alert, etc.)"
         required: true
         type: string
-
       to_revision:
-        description: "Optional: rollback to a specific revision number (leave empty to rollback to previous)"
+        description: "Optional: rollback to a specific revision number (leave empty to auto-select previous non-placeholder image)"
         required: false
         type: string
-
       cluster_name:
         description: "EKS cluster name (optional override; else uses secret EKS_CLUSTER_NAME)"
         required: false
         type: string
-
       namespace:
         description: "Kubernetes namespace"
         required: true
         default: "default"
         type: string
-
       deployment_name:
         description: "Kubernetes deployment name"
         required: true
         default: "predictive-maintenance-api"
         type: string
-
       destroy_cluster_after_test:
         description: "Demo only: delete the EKS cluster after successful rollback verification (only pm-debug-* allowed)"
         required: true
         default: "false"
         type: choice
         options: ["true", "false"]
-
       bootstrap_eks_access:
         description: "If true, create/associate EKS access entry for the AWS role used by this workflow"
         required: true
@@ -111,7 +105,6 @@ jobs:
         run: |
           set -euo pipefail
           raw="${{ steps.vars.outputs.cluster }}"
-
           name="$(echo "$raw" \
             | tr '[:upper:]' '[:lower:]' \
             | tr '/_' '--' \
@@ -160,6 +153,12 @@ jobs:
         with:
           version: "v1.30.0"
 
+      - name: Install jq (needed to pick correct rollback image)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+
       - name: Bootstrap EKS access entry (optional, fixes "provide credentials")
         if: steps.vars.outputs.bootstrap == 'true'
         env:
@@ -188,16 +187,7 @@ jobs:
           set -euo pipefail
           aws eks update-kubeconfig --name "${{ steps.normalize.outputs.cluster_normalized }}" --region "${AWS_REGION}"
 
-          set +e
-          kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide >/tmp/kubectl_auth_check.log 2>&1
-          rc=$?
-          set -e
-
-          if [ "$rc" -ne 0 ]; then
-            echo "kubectl auth check failed. Output:"
-            cat /tmp/kubectl_auth_check.log || true
-            exit 1
-          fi
+          kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide >/dev/null
 
       - name: Show current state (pre-rollback)
         run: |
@@ -205,25 +195,58 @@ jobs:
           kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide
           kubectl -n "${{ steps.vars.outputs.namespace }}" rollout history deployment/"${{ steps.vars.outputs.deploy }}" | tee rollout_history_before.txt
 
-      - name: Roll back deployment (do not fail on rollout-status timeout; health check decides)
+      - name: Roll back (never pick placeholder image)
         id: rollback_apply
         run: |
           set -euo pipefail
+          ns="${{ steps.vars.outputs.namespace }}"
+          dep="${{ steps.vars.outputs.deploy }}"
+          to_rev="${{ steps.vars.outputs.to_revision }}"
 
-          TO_REV="${{ steps.vars.outputs.to_revision }}"
-          if [ -n "${TO_REV}" ]; then
-            kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}" --to-revision="${TO_REV}"
+          # If user explicitly requested a revision, do that.
+          if [ -n "${to_rev}" ]; then
+            echo "Rolling back to explicit revision: ${to_rev}"
+            kubectl -n "$ns" rollout undo deployment/"$dep" --to-revision="${to_rev}"
           else
-            kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}"
+            # Auto-select rollback image:
+            # pick the most recent ReplicaSet image that is NOT ':placeholder' and NOT the current image.
+            cur_img="$(kubectl -n "$ns" get deploy "$dep" -o json | jq -r '.spec.template.spec.containers[] | select(.name=="api") | .image')"
+            cur_rev="$(kubectl -n "$ns" get deploy "$dep" -o json | jq -r '.metadata.annotations["deployment.kubernetes.io/revision"] // "0"' )"
+
+            echo "Current image: $cur_img"
+            echo "Current revision: $cur_rev"
+
+            rs_json="$(kubectl -n "$ns" get rs -l app=predictive-maintenance-api -o json)"
+            candidate="$(echo "$rs_json" | jq -r --arg cur "$cur_img" --argjson currev "$cur_rev" '
+              [
+                .items[]
+                | {
+                    rev: (.metadata.annotations["deployment.kubernetes.io/revision"]|tonumber),
+                    img: (.spec.template.spec.containers[] | select(.name=="api") | .image)
+                  }
+              ]
+              | map(select(.rev < $currev and (.img|contains(":placeholder")|not) and .img != $cur))
+              | sort_by(.rev)
+              | last
+              | .img // empty
+            ')"
+
+            if [ -z "$candidate" ]; then
+              echo "ERROR: Could not find a previous non-placeholder image to roll back to."
+              echo "ReplicaSets seen:"
+              echo "$rs_json" | jq -r '.items[] | "\(.metadata.name) rev=\(.metadata.annotations["deployment.kubernetes.io/revision"]) img=\(.spec.template.spec.containers[]|select(.name=="api")|.image)"'
+              exit 1
+            fi
+
+            echo "Auto-selected rollback image: $candidate"
+            kubectl -n "$ns" set image deployment/"$dep" api="$candidate"
           fi
 
-          # Rollout status can time out if old replicas take time to terminate.
-          # Treat this as non-fatal; the real gate is /health after rollback.
+          # Rollout status can still be slow; do not hard-fail here.
           set +e
-          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout status deployment/"${{ steps.vars.outputs.deploy }}" --timeout=600s
+          kubectl -n "$ns" rollout status deployment/"$dep" --timeout=600s
           rc=$?
           set -e
-
           echo "rollout_status_rc=$rc" >> "$GITHUB_OUTPUT"
           if [ "$rc" -ne 0 ]; then
             echo "WARNING: rollout status timed out; continuing to diagnostics + health verification."
@@ -244,26 +267,23 @@ jobs:
           kubectl -n "$ns" get rs -o wide || true
 
           echo "---- pods ----"
-          kubectl -n "$ns" get pods -l app="$dep" -o wide || true
           kubectl -n "$ns" get pods -o wide || true
 
           echo "---- events (tail) ----"
-          kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 80 || true
+          kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 120 || true
 
       - name: Verify service health after rollback (port-forward + /health)
         id: health
         run: |
           set -euo pipefail
-
           ns="${{ steps.vars.outputs.namespace }}"
           dep="${{ steps.vars.outputs.deploy }}"
 
           rm -f /tmp/pf.log || true
-
           kubectl -n "$ns" port-forward deployment/"$dep" 18000:8000 --address 127.0.0.1 >/tmp/pf.log 2>&1 &
           PF_PID=$!
 
-          # Wait up to 30s for port-forward to become ready (or fail fast if it dies)
+          # Wait for port-forward readiness or fail fast if it exits
           ready="false"
           for i in $(seq 1 30); do
             if ! kill -0 "$PF_PID" 2>/dev/null; then
@@ -294,13 +314,12 @@ jobs:
           done
 
           kill "$PF_PID" || true
-
           echo "ok=${ok}" >> "$GITHUB_OUTPUT"
+
           if [ "$ok" != "true" ]; then
             echo "Health check failed; port-forward logs:"
             tail -n 200 /tmp/pf.log || true
           fi
-
 
       - name: Fail workflow if rollback verification failed
         if: steps.health.outputs.ok != 'true'
@@ -333,16 +352,13 @@ jobs:
           eksctl version
 
       - name: "Demo cleanup (optional): delete EKS cluster"
-        # Only delete AFTER successful rollback verification
         if: success() && steps.vars.outputs.destroy == 'true'
         shell: bash
         run: |
           set -euo pipefail
           CLUSTER="${{ steps.normalize.outputs.cluster_normalized }}"
-
           if [[ "$CLUSTER" != pm-debug-* ]]; then
             echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-debug-* safety pattern."
             exit 1
           fi
-
           eksctl delete cluster --name "$CLUSTER" --region "${AWS_REGION}" --wait
