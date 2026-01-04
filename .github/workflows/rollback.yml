@@ -258,8 +258,31 @@ jobs:
           ns="${{ steps.vars.outputs.namespace }}"
           dep="${{ steps.vars.outputs.deploy }}"
 
-          kubectl -n "$ns" port-forward deployment/"$dep" 18000:8000 >/tmp/pf.log 2>&1 &
+          rm -f /tmp/pf.log || true
+
+          kubectl -n "$ns" port-forward deployment/"$dep" 18000:8000 --address 127.0.0.1 >/tmp/pf.log 2>&1 &
           PF_PID=$!
+
+          # Wait up to 30s for port-forward to become ready (or fail fast if it dies)
+          ready="false"
+          for i in $(seq 1 30); do
+            if ! kill -0 "$PF_PID" 2>/dev/null; then
+              echo "port-forward exited early; logs:"
+              tail -n 200 /tmp/pf.log || true
+              break
+            fi
+            if grep -q "Forwarding from 127.0.0.1:18000" /tmp/pf.log; then
+              ready="true"
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" != "true" ]; then
+            echo "port-forward never became ready; logs:"
+            tail -n 200 /tmp/pf.log || true
+            exit 1
+          fi
 
           ok="false"
           for i in $(seq 1 60); do
@@ -270,14 +293,14 @@ jobs:
             sleep 2
           done
 
-          kill "${PF_PID}" || true
+          kill "$PF_PID" || true
 
           echo "ok=${ok}" >> "$GITHUB_OUTPUT"
-
           if [ "$ok" != "true" ]; then
-            echo "Health check failed after rollback; pf logs:"
+            echo "Health check failed; port-forward logs:"
             tail -n 200 /tmp/pf.log || true
           fi
+
 
       - name: Fail workflow if rollback verification failed
         if: steps.health.outputs.ok != 'true'
@@ -300,6 +323,14 @@ jobs:
           path: |
             rollout_history_before.txt
             rollout_history_after.txt
+
+      - name: Install eksctl (needed for cluster deletion)
+        if: success() && steps.vars.outputs.destroy == 'true'
+        run: |
+          set -euo pipefail
+          curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl version
 
       - name: "Demo cleanup (optional): delete EKS cluster"
         # Only delete AFTER successful rollback verification
