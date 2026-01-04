@@ -4,4 +4,4 @@ src/__pycache__/*
 mlflow.db
 .dvc
 actions-runner/*
-artifacts/processed/data_validation.json
+artifacts/processed/*
