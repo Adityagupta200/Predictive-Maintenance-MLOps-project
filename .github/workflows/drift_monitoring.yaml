@@ -184,7 +184,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          python scripts/drift_check.py \
+          python .github/scripts/drift_check.py \
             --reference artifacts/processed/train.csv \
             --current reports/current_for_drift_check.csv \
             --out_dir reports
