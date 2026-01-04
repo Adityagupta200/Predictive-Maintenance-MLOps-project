@@ -110,10 +110,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           raw="${{ steps.vars.outputs.cluster }}"
 
-          # EKS cluster name must start with [A-Za-z0-9] and then [A-Za-z0-9-_]*
           name="$(echo "$raw" \
             | tr '[:upper:]' '[:lower:]' \
             | tr '/_' '--' \
@@ -129,7 +127,6 @@ jobs:
           fi
 
           name="${name:0:80}"
-
           echo "cluster_normalized=$name" >> "$GITHUB_OUTPUT"
           echo "Using cluster (raw)        : $raw"
           echo "Using cluster (normalized) : $name"
@@ -199,10 +196,6 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             echo "kubectl auth check failed. Output:"
             cat /tmp/kubectl_auth_check.log || true
-            echo ""
-            echo "Fix options:"
-            echo "1) Keep bootstrap_eks_access=true (recommended for demo)."
-            echo "2) Or authorize the workflow role in EKS (Access Entry / aws-auth)."
             exit 1
           fi
 
@@ -212,35 +205,84 @@ jobs:
           kubectl -n "${{ steps.vars.outputs.namespace }}" get deploy "${{ steps.vars.outputs.deploy }}" -o wide
           kubectl -n "${{ steps.vars.outputs.namespace }}" rollout history deployment/"${{ steps.vars.outputs.deploy }}" | tee rollout_history_before.txt
 
-      - name: Roll back deployment
+      - name: Roll back deployment (do not fail on rollout-status timeout; health check decides)
+        id: rollback_apply
         run: |
           set -euo pipefail
+
           TO_REV="${{ steps.vars.outputs.to_revision }}"
           if [ -n "${TO_REV}" ]; then
             kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}" --to-revision="${TO_REV}"
           else
             kubectl -n "${{ steps.vars.outputs.namespace }}" rollout undo deployment/"${{ steps.vars.outputs.deploy }}"
           fi
-          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout status deployment/"${{ steps.vars.outputs.deploy }}" --timeout=180s
 
-      - name: Verify service health after rollback (port-forward + /health)
+          # Rollout status can time out if old replicas take time to terminate.
+          # Treat this as non-fatal; the real gate is /health after rollback.
+          set +e
+          kubectl -n "${{ steps.vars.outputs.namespace }}" rollout status deployment/"${{ steps.vars.outputs.deploy }}" --timeout=600s
+          rc=$?
+          set -e
+
+          echo "rollout_status_rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "WARNING: rollout status timed out; continuing to diagnostics + health verification."
+          fi
+
+      - name: Diagnostics (only if rollout status timed out)
+        if: steps.rollback_apply.outputs.rollout_status_rc != '0'
         run: |
           set -euo pipefail
-          kubectl -n "${{ steps.vars.outputs.namespace }}" port-forward deployment/"${{ steps.vars.outputs.deploy }}" 18000:8000 >/tmp/pf.log 2>&1 &
+          ns="${{ steps.vars.outputs.namespace }}"
+          dep="${{ steps.vars.outputs.deploy }}"
+
+          echo "---- deploy ----"
+          kubectl -n "$ns" get deploy "$dep" -o wide || true
+          kubectl -n "$ns" describe deploy "$dep" || true
+
+          echo "---- rs ----"
+          kubectl -n "$ns" get rs -o wide || true
+
+          echo "---- pods ----"
+          kubectl -n "$ns" get pods -l app="$dep" -o wide || true
+          kubectl -n "$ns" get pods -o wide || true
+
+          echo "---- events (tail) ----"
+          kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -n 80 || true
+
+      - name: Verify service health after rollback (port-forward + /health)
+        id: health
+        run: |
+          set -euo pipefail
+
+          ns="${{ steps.vars.outputs.namespace }}"
+          dep="${{ steps.vars.outputs.deploy }}"
+
+          kubectl -n "$ns" port-forward deployment/"$dep" 18000:8000 >/tmp/pf.log 2>&1 &
           PF_PID=$!
 
+          ok="false"
           for i in $(seq 1 60); do
             if curl -fsS "http://127.0.0.1:18000/health" >/dev/null; then
-              echo "Health OK after rollback"
-              kill "${PF_PID}" || true
-              exit 0
+              ok="true"
+              break
             fi
             sleep 2
           done
 
-          echo "Health check failed after rollback; pf logs:"
-          tail -n 200 /tmp/pf.log || true
           kill "${PF_PID}" || true
+
+          echo "ok=${ok}" >> "$GITHUB_OUTPUT"
+
+          if [ "$ok" != "true" ]; then
+            echo "Health check failed after rollback; pf logs:"
+            tail -n 200 /tmp/pf.log || true
+          fi
+
+      - name: Fail workflow if rollback verification failed
+        if: steps.health.outputs.ok != 'true'
+        run: |
+          echo "Rollback verification failed (service /health not OK)."
           exit 1
 
       - name: Show state (post-rollback)
@@ -260,7 +302,7 @@ jobs:
             rollout_history_after.txt
 
       - name: "Demo cleanup (optional): delete EKS cluster"
-        # Only delete after successful rollback verification
+        # Only delete AFTER successful rollback verification
         if: success() && steps.vars.outputs.destroy == 'true'
         shell: bash
         run: |
