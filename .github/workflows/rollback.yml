@@ -101,7 +101,7 @@ jobs:
           set -euo pipefail
           aws sts get-caller-identity
 
-      - name: Preflight: cluster exists and ACTIVE
+      - name: "Preflight: cluster exists and ACTIVE"
         run: |
           set -euo pipefail
           aws eks describe-cluster \
@@ -205,9 +205,12 @@ jobs:
 
       - name: "Demo cleanup (optional): delete EKS cluster"
         if: steps.vars.outputs.destroy == 'true'
+        shell: bash
         run: |
           set -euo pipefail
-          echo "Deleting cluster '${{ steps.vars.outputs.cluster }}' (demo cleanup)..."
-          curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin/eksctl
-          eksctl delete cluster --name "${{ steps.vars.outputs.cluster }}" --region "${AWS_REGION}" --wait
+          CLUSTER="${{ steps.vars.outputs.cluster }}"
+          if [[ "$CLUSTER" != pm-debug-* ]]; then
+            echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-debug-* safety pattern."
+            exit 1
+          fi
+          eksctl delete cluster --name "$CLUSTER" --region "${AWS_REGION}" --wait
