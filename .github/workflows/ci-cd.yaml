@@ -26,7 +26,7 @@ on:
         options: ["true", "false"]
 
       keep_cluster_after_success:
-        description: "If true, keep the pm-debug-* cluster after a successful drill so drift_monitoring + rollback can run; destroy later via rollback.yml."
+        description: "If true, keep the pm-* cluster after a successful drill so drift_monitoring + rollback can run; destroy later via rollback.yml."
         required: true
         default: "false"
         type: choice
@@ -329,7 +329,7 @@ jobs:
 
     env:
       AWS_REGION: ap-south-1
-      CLUSTER_NAME: pm-debug-${{ github.repository_id }}-${{ github.ref_name }}
+      CLUSTER_NAME: pm--${{ github.repository_id }}-${{ github.ref_name }}
       K8S_NAMESPACE: default
       DEPLOYMENT_NAME: predictive-maintenance-api
 
@@ -368,7 +368,7 @@ jobs:
           set -euo pipefail
           raw="${CLUSTER_NAME}"
           name="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr '/_' '--' | tr -cd 'a-z0-9-')"
-          if [ -z "$name" ]; then name="pm-debug"; fi
+          if [ -z "$name" ]; then name="pm-"; fi
           if ! echo "$name" | grep -Eq '^[a-z]'; then name="pm-${name}"; fi
           name="${name:0:80}"
           echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"

@@ -34,7 +34,7 @@ on:
         type: string
 
       destroy_cluster_after_test:
-        description: "Demo only: after rollback, delete EKS cluster (only pm-debug-* allowed in rollback.yml)"
+        description: "Demo only: after rollback, delete EKS cluster (only pm--* allowed in rollback.yml)"
         required: true
         default: "true"
         type: choice

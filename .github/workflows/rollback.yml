@@ -26,7 +26,7 @@ on:
         default: "predictive-maintenance-api"
         type: string
       destroy_cluster_after_test:
-        description: "Demo only: delete the EKS cluster after successful rollback verification (only pm-debug-* allowed)"
+        description: "Demo only: delete the EKS cluster after successful rollback verification (only pm--* allowed)"
         required: true
         default: "false"
         type: choice
@@ -361,8 +361,8 @@ jobs:
         run: |
           set -euo pipefail
           CLUSTER="${{ steps.normalize.outputs.cluster_normalized }}"
-          if [[ "$CLUSTER" != pm-debug-* ]]; then
-            echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-debug-* safety pattern."
+          if [[ "$CLUSTER" != pm-* ]]; then
+            echo "Refusing to delete cluster '$CLUSTER' because it doesn't match pm-* safety pattern."
             exit 1
           fi
           eksctl delete cluster --name "$CLUSTER" --region "${AWS_REGION}" --wait
