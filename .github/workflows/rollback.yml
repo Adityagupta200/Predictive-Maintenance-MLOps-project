@@ -352,7 +352,11 @@ jobs:
           eksctl version
 
       - name: "Demo cleanup (optional): delete EKS cluster"
-        if: success() && steps.vars.outputs.destroy == 'true'
+        if: >
+          success() &&
+          steps.vars.outputs.destroy == 'true' &&
+          steps.health.outputs.ok == 'true' &&
+          steps.rollback_apply.outputs.rollout_status_rc == '0'
         shell: bash
         run: |
           set -euo pipefail
