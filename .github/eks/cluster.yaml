@@ -6,6 +6,9 @@ metadata:
   region: ${AWS_REGION}
   version: "1.30"
 
+accessConfig:
+  authenticationMode: API_AND_CONFIG_MAP
+
 managedNodeGroups:
   - name: ng-1
     instanceType: t3.small
