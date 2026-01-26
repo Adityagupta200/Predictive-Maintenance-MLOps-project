@@ -1,0 +1,9 @@
+# /CMaps
+/mlruns
+src/__pycache__/*
+mlflow.db
+.dvc
+actions-runner
+artifacts/*
+.venv
+.mlruns

@@ -1,0 +1,12 @@
+# requirements.txt
+pandas
+numpy
+scikit-learn
+xgboost
+optuna
+mlflow
+PyYAML
+dvc
+fastapi
+uvicorn
+optuna-integration[mlflow]

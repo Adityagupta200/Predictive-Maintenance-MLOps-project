@@ -1,0 +1,89 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: drift-check-now
+  labels:
+    app: drift-check
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: drift-check
+    spec:
+      restartPolicy: Never
+      serviceAccountName: drift-dvc-reader
+
+      volumes:
+        - name: artifacts
+          emptyDir: {}
+        - name: reports
+          emptyDir: {}
+
+      initContainers:
+        - name: fetch-artifacts
+          image: ${DRIFT_IMAGE}
+          imagePullPolicy: Always
+          workingDir: /app
+          env:
+            - name: AWS_REGION
+              value: ap-south-1
+            - name: DVC_REMOTE_NAME
+              value: s3remote
+            - name: DVC_REMOTE_URL
+              value: s3://${DVC_BUCKET_NAME}/${DVC_REMOTE_PREFIX}
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              dvc init --no-scm -f >/dev/null 2>&1 || true
+
+              # Use runtime env vars from the Pod, not templated ones
+              dvc remote add -f -d "$DVC_REMOTE_NAME" "$DVC_REMOTE_URL"
+
+              dvc pull -r "$DVC_REMOTE_NAME" artifacts/processed/train.csv artifacts/processed/val.csv
+
+              test -f /app/artifacts/processed/train.csv
+              test -f /app/artifacts/processed/val.csv
+
+              ls -lah /app/artifacts/processed
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/artifacts
+
+      containers:
+        - name: drift
+          image: ${DRIFT_IMAGE}
+          imagePullPolicy: Always
+          workingDir: /app
+          env:
+            - name: DRIFT_PSI_THRESHOLD
+              value: "0.2"
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+
+              mkdir -p /app/reports
+
+              python -m monitoring.drift_check \
+                --reference /app/artifacts/processed/train.csv \
+                --current /app/artifacts/processed/val.csv \
+                --out_dir /app/reports \
+                --psi_threshold 0.2
+
+              ls -lah /app/reports
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/artifacts
+            - name: reports
+              mountPath: /app/reports
+
+        # Keep the Pod Running so kubectl cp can exec/tar from a live container
+        - name: keepalive
+          image: busybox:1.36
+          command: ["sh", "-lc", "sleep 3600"]
+          volumeMounts:
+            - name: reports
+              mountPath: /app/reports

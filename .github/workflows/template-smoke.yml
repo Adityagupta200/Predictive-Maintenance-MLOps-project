@@ -1,0 +1,65 @@
+name: Template Smoke
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  template-smoke:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: "3.11"
+      TEMPLATE_DIR: cookiecutter
+      OUT_DIR: ${{ runner.temp }}/generated
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install cookiecutter
+        run: |
+          python -m pip install --upgrade pip
+          pip install cookiecutter
+
+      - name: Generate project from template
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$OUT_DIR"
+          cookiecutter "$TEMPLATE_DIR" --no-input --output-dir "$OUT_DIR"
+
+          echo "Generated output dir:"
+          ls -la "$OUT_DIR"
+
+          # Detect the generated project directory (cookiecutter.project_slug may vary)
+          PROJECT_DIR="$(find "$OUT_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+
+          if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+            echo "ERROR: Could not detect generated project directory under $OUT_DIR"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Using PROJECT_DIR=$PROJECT_DIR"
+
+      - name: Install deps in generated project
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          make setup
+
+      - name: Test generated project
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          make test
+
+      - name: Build docs in generated project
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          make docs

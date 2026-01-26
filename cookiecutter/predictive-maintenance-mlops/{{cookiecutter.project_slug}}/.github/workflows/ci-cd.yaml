@@ -1,0 +1,640 @@
+name: ci-cd
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+on:
+  pull_request:
+    branches: [master]
+
+  workflow_dispatch:
+    inputs:
+      run_ephemeral_eks_drill:
+        description: "Create/reuse EKS, deploy, run post-deploy gate, rollback on failure, then destroy (unless keep_cluster_after_success=true)."
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+      destroy_on_failure:
+        description: "If true, destroys EKS even when the drill fails. Default keeps cluster for debugging/reuse."
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+      keep_cluster_after_success:
+        description: "If true, keep the pm-* cluster after a successful drill so drift_monitoring + rollback can run; destroy later via rollback.yml."
+        required: true
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+      image_version_alias:
+        description: "Optional: also tag/push AND deploy the built image as :v1 or :v2 (run workflow twice to create both)."
+        required: true
+        default: "none"
+        type: choice
+        options: ["none", "v1", "v2"]
+
+concurrency:
+  group: pm-eks-debug-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+  # When workflow_dispatch runs on ci-pr-test, this becomes "ci-pr-test".
+  # When PR runs, this becomes the PR base branch (usually "master").
+  ARTIFACT_SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+
+  # ML gate configuration
+  MLFLOW_TRACKING_URI: "file:./mlruns"
+  MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
+  METRIC_NAME: "r2"
+  METRIC_MODE: "max"
+  METRIC_THRESHOLD: "0.90"
+  METRICS_PATH: "artifacts/metrics/metrics.json"
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      train_changed: ${{ steps.filter.outputs.train_changed }}
+      image_changed: ${{ steps.filter.outputs.image_changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes (paths)
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          base: master
+          filters: |
+            train_changed:
+              - "src/**"
+              - "train_model.py"
+              - "data_preprocessing.py"
+              - "model_loader.py"
+              - "requirements.txt"
+              - "requirements-api.txt"
+              - "dvc.yaml"
+              - "dvc.lock"
+              - "params.yaml"
+              - "artifacts/**"
+              - ".github/scripts/check_accuracy_gate.py"
+            image_changed:
+              - "infra/docker/**"
+              - "infra/k8s/**"
+              - "main.py"
+              - "schemas.py"
+              - "observability.py"
+              - "requirements.txt"
+              - "requirements-api.txt"
+              - ".github/scripts/post_deploy_gate.py"
+              - "models/**"
+
+  test-train-validate:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    env:
+      MLFLOW_TRACKING_URI: "file:./mlruns"
+      MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Decide train vs reuse artifacts (only rehydrate from runs that have BOTH artifacts)
+        id: plan
+        uses: actions/github-script@v7
+        env:
+          ARTIFACT_SOURCE_BRANCH: ${{ env.ARTIFACT_SOURCE_BRANCH }}
+        with:
+          script: |
+            const trainChanged = `${{ needs.detect-changes.outputs.train_changed }}` === 'true';
+            core.setOutput('train_changed', String(trainChanged));
+            if (trainChanged) {
+              core.setOutput('mode', 'train');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflow_id = 'ci-cd.yaml';
+            const branch = process.env.ARTIFACT_SOURCE_BRANCH;
+
+            const requiredArtifacts = ['model-artifact', 'post-deploy-data'];
+
+            const runsResp = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id,
+              branch,
+              status: 'completed',
+              per_page: 50,
+            });
+
+            const successful = (runsResp.data.workflow_runs || []).filter(r => r.conclusion === 'success');
+
+            // Find the most recent successful run that includes BOTH required artifacts and they are not expired.
+            for (const r of successful) {
+              const artsResp = await github.rest.actions.listWorkflowRunArtifacts({
+                owner,
+                repo,
+                run_id: r.id,
+                per_page: 100,
+              });
+
+              const artifacts = artsResp.data.artifacts || [];
+              const availableNames = new Set(
+                artifacts
+                  .filter(a => !a.expired)
+                  .map(a => a.name)
+              );
+
+              const ok = requiredArtifacts.every(n => availableNames.has(n));
+              if (ok) {
+                core.setOutput('mode', 'rehydrate');
+                core.setOutput('run_id', String(r.id));
+                core.setOutput('source_branch', branch);
+                return;
+              }
+            }
+
+            core.setOutput('mode', 'train_fallback');
+            core.setOutput('source_branch', branch);
+            core.warning(
+              `No successful run found on branch '${branch}' containing artifacts: ${requiredArtifacts.join(', ')}. Falling back to training.`
+            );
+
+      # ----------------------------
+      # Path A: run full train/validate
+      # ----------------------------
+      - name: Set up Python
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ -f requirements-api.txt ]; then pip install -r requirements-api.txt; fi
+          pip install pytest
+
+      - name: Add src to PYTHONPATH
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        run: echo "PYTHONPATH=$PWD/src" >> "$GITHUB_ENV"
+
+      - name: Run unit tests (PyTest)
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        run: pytest -q
+
+      - name: Run DVC pipeline (train + validate)
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        run: dvc repro
+
+      - name: Verify model artifact exists
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        run: |
+          set -euo pipefail
+          ls -la models || true
+          test -f models/best_model.joblib
+
+      - name: Enforce quality gate
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        env:
+          MLFLOW_TRACKING_URI: "file:./mlruns"
+          MLFLOW_EXPERIMENT_NAME: "cmapss_rul_xgb_optuna"
+          METRIC_NAME: "${{ env.METRIC_NAME }}"
+          METRIC_MODE: "${{ env.METRIC_MODE }}"
+          METRIC_THRESHOLD: "${{ env.METRIC_THRESHOLD }}"
+          METRICS_PATH: "${{ env.METRICS_PATH }}"
+        run: python .github/scripts/check_accuracy_gate.py
+
+      - name: Upload model artifact for deploy
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifact
+          path: models/best_model.joblib
+          if-no-files-found: error
+
+      - name: Upload validation data + feature metadata for post-deploy checks
+        if: steps.plan.outputs.mode == 'train' || steps.plan.outputs.mode == 'train_fallback'
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-data
+          path: |
+            artifacts/processed/train.csv
+            artifacts/processed/val.csv
+            artifacts/processed/meta_features.json
+          if-no-files-found: error
+
+      # ----------------------------
+      # Path B: rehydrate last successful artifacts
+      # ----------------------------
+      - name: Download model-artifact from last successful run
+        if: steps.plan.outputs.mode == 'rehydrate'
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifact
+          run-id: ${{ steps.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .rehydrate/model
+
+      - name: Download post-deploy-data from last successful run
+        if: steps.plan.outputs.mode == 'rehydrate'
+        uses: actions/download-artifact@v4
+        with:
+          name: post-deploy-data
+          run-id: ${{ steps.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .rehydrate/post
+
+      - name: Re-upload reused artifacts into this run
+        if: steps.plan.outputs.mode == 'rehydrate'
+        run: |
+          set -euo pipefail
+          mkdir -p models artifacts/processed
+
+          if [ -f .rehydrate/model/best_model.joblib ]; then
+            cp .rehydrate/model/best_model.joblib models/best_model.joblib
+          elif [ -f .rehydrate/model/models/best_model.joblib ]; then
+            cp .rehydrate/model/models/best_model.joblib models/best_model.joblib
+          else
+            echo "Downloaded model artifact contents:"
+            ls -R .rehydrate/model
+            exit 1
+          fi
+
+          for f in train.csv val.csv meta_features.json; do
+            if [ -f ".rehydrate/post/$f" ]; then
+              cp ".rehydrate/post/$f" "artifacts/processed/$f"
+            elif [ -f ".rehydrate/post/artifacts/processed/$f" ]; then
+              cp ".rehydrate/post/artifacts/processed/$f" "artifacts/processed/$f"
+            else
+              echo "Downloaded post-deploy-data contents:"
+              ls -R .rehydrate/post
+              exit 1
+            fi
+          done
+
+          test -f models/best_model.joblib
+          test -f artifacts/processed/train.csv
+          test -f artifacts/processed/val.csv
+          test -f artifacts/processed/meta_features.json
+
+      - name: Upload model artifact for deploy (rehydrated)
+        if: steps.plan.outputs.mode == 'rehydrate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifact
+          path: models/best_model.joblib
+          if-no-files-found: error
+
+      - name: Upload post-deploy-data (rehydrated)
+        if: steps.plan.outputs.mode == 'rehydrate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-data
+          path: |
+            artifacts/processed/train.csv
+            artifacts/processed/val.csv
+            artifacts/processed/meta_features.json
+          if-no-files-found: error
+
+  ephemeral-eks-drill:
+    needs: [detect-changes, test-train-validate]
+    if: >
+      needs.test-train-validate.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_ephemeral_eks_drill == 'true'
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+
+    env:
+      AWS_REGION: ap-south-1
+      CLUSTER_NAME: pm--${{ github.repository_id }}-${{ github.ref_name }}
+      K8S_NAMESPACE: default
+      DEPLOYMENT_NAME: predictive-maintenance-api
+
+      IMAGE_TAG: ${{ github.sha }}
+      IMAGE_REPO: ${{ secrets.DOCKER_IMAGE_REPO }}
+
+      IMAGE_VERSION_ALIAS: ${{ inputs.image_version_alias }}
+      KEEP_CLUSTER_AFTER_SUCCESS: ${{ inputs.keep_cluster_after_success }}
+
+      # Gate thresholds
+      P95_MS_MAX: "200"
+      POST_DEPLOY_R2_MIN: "0.90"
+
+      # Gate files
+      VAL_CSV: "artifacts/processed/val.csv"
+      META_FEATURES: "artifacts/processed/meta_features.json"
+      VAL_CSV_ALIGNED: "artifacts/processed/val_for_api.csv"
+      POST_DEPLOY_OUT: "artifacts/post_deploy_gate.json"
+      N_REQUESTS: "50"
+
+      # In-cluster gate URL (must match the ClusterIP Service created below)
+      IN_CLUSTER_BASE_URL: "http://predictive-maintenance-svc:8000"
+      DESTROY_ON_FAILURE: ${{ inputs.destroy_on_failure }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Normalize cluster name (stable + EKS-safe)
+        id: normalize_cluster
+        run: |
+          set -euo pipefail
+          raw="${CLUSTER_NAME}"
+          name="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr '/_' '--' | tr -cd 'a-z0-9-')"
+          if [ -z "$name" ]; then name="pm-"; fi
+          if ! echo "$name" | grep -Eq '^[a-z]'; then name="pm-${name}"; fi
+          name="${name:0:80}"
+          echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"
+          echo "cluster_name=$name" >> "$GITHUB_OUTPUT"
+          echo "Using CLUSTER_NAME=$name"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifact
+          path: .github_artifacts
+
+      - name: Download post-deploy artifacts (train.csv + val.csv + meta_features.json)
+        uses: actions/download-artifact@v4
+        with:
+          name: post-deploy-data
+          path: .post_deploy_artifacts
+
+      - name: Place model + data into build/test context
+        run: |
+          set -euo pipefail
+          mkdir -p models artifacts/processed
+
+          if [ -f .github_artifacts/best_model.joblib ]; then
+            cp .github_artifacts/best_model.joblib models/best_model.joblib
+          elif [ -f .github_artifacts/models/best_model.joblib ]; then
+            cp .github_artifacts/models/best_model.joblib models/best_model.joblib
+          else
+            echo "Downloaded model artifact contents:"
+            ls -R .github_artifacts
+            exit 1
+          fi
+          test -f models/best_model.joblib
+
+          for f in train.csv val.csv meta_features.json; do
+            if [ -f ".post_deploy_artifacts/$f" ]; then
+              cp ".post_deploy_artifacts/$f" "artifacts/processed/$f"
+            elif [ -f ".post_deploy_artifacts/artifacts/processed/$f" ]; then
+              cp ".post_deploy_artifacts/artifacts/processed/$f" "artifacts/processed/$f"
+            else
+              echo "Missing $f in downloaded post-deploy artifacts:"
+              ls -R .post_deploy_artifacts
+              exit 1
+            fi
+          done
+
+      - name: Log in to Docker registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Decide image to deploy (support v1/v2 demo tags)
+        id: image_plan
+        run: |
+          set -euo pipefail
+
+          # If user asked for v1/v2, always deploy that tag (and force a build so it exists).
+          if [ "${IMAGE_VERSION_ALIAS}" != "none" ]; then
+            if [ "${IMAGE_VERSION_ALIAS}" != "v1" ] && [ "${IMAGE_VERSION_ALIAS}" != "v2" ]; then
+              echo "Invalid IMAGE_VERSION_ALIAS=${IMAGE_VERSION_ALIAS} (allowed: none, v1, v2)"
+              exit 1
+            fi
+            echo "build_image=true" >> "$GITHUB_OUTPUT"
+            echo "image_to_deploy=${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Default behavior
+          if [ "${{ needs.detect-changes.outputs.image_changed }}" = "true" ]; then
+            echo "build_image=true" >> "$GITHUB_OUTPUT"
+            echo "image_to_deploy=${IMAGE_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if docker manifest inspect "${IMAGE_REPO}:latest" >/dev/null 2>&1; then
+            echo "build_image=false" >> "$GITHUB_OUTPUT"
+            echo "image_to_deploy=${IMAGE_REPO}:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "Latest image not found in registry; falling back to build."
+            echo "build_image=true" >> "$GITHUB_OUTPUT"
+            echo "image_to_deploy=${IMAGE_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push image (only if needed)
+        if: steps.image_plan.outputs.build_image == 'true'
+        run: |
+          set -euo pipefail
+
+          IMAGE_SHA="${IMAGE_REPO}:${IMAGE_TAG}"
+          docker build -f infra/docker/DockerFile -t "${IMAGE_SHA}" .
+          docker push "${IMAGE_SHA}"
+
+          if [ "${IMAGE_VERSION_ALIAS}" != "none" ]; then
+            docker tag "${IMAGE_SHA}" "${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+            docker push "${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+            echo "Pushed alias tag: ${IMAGE_REPO}:${IMAGE_VERSION_ALIAS}"
+          fi
+
+          if [ "${{ github.ref_name }}" = "master" ]; then
+            docker tag "${IMAGE_SHA}" "${IMAGE_REPO}:latest"
+            docker push "${IMAGE_REPO}:latest"
+          fi
+
+      # --- remainder: your existing EKS create/reuse, deploy, gate, rollback logic ---
+      # Keep as-is from your current file (preflight, create, kubectl apply, gate, etc.)
+      # Only the destroy condition below is changed to respect KEEP_CLUSTER_AFTER_SUCCESS.
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.EKS_DEPLOY }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Get Role Identity
+        run: aws sts get-caller-identity
+
+      - name: Install eksctl
+        run: |
+          set -euo pipefail
+          curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl version
+
+      - name: Install envsubst (gettext-base)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gettext-base
+
+      - name: Check EKS cluster + eksctl CloudFormation stacks (reuse)
+        id: preflight
+        run: |
+          set -euo pipefail
+
+          CLUSTER_EXISTS=false
+          if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+            CLUSTER_EXISTS=true
+            status="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --query 'cluster.status' --output text)"
+            echo "Cluster exists. status=${status}"
+            if [ "${status}" != "ACTIVE" ]; then
+              echo "Waiting for cluster to become ACTIVE..."
+              aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+            fi
+          else
+            echo "Cluster does not exist."
+          fi
+
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -n "${STACKS}" ] && [ "${STACKS}" != "None" ]; then
+            echo "Found eksctl CloudFormation stacks:"
+            echo "${STACKS}"
+            STACK_EXISTS=true
+          else
+            STACK_EXISTS=false
+          fi
+
+          echo "cluster_exists=${CLUSTER_EXISTS}" >> "$GITHUB_OUTPUT"
+          echo "stack_exists=${STACK_EXISTS}" >> "$GITHUB_OUTPUT"
+
+      - name: Cleanup orphan eksctl CloudFormation stacks (only if cluster missing)
+        if: steps.preflight.outputs.cluster_exists != 'true' && steps.preflight.outputs.stack_exists == 'true'
+        run: |
+          set -euo pipefail
+          echo "Cluster is missing but eksctl stacks exist. Cleaning orphan stacks to unblock create..."
+
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -z "${STACKS}" ] || [ "${STACKS}" = "None" ]; then
+            echo "No stacks to delete."
+            exit 0
+          fi
+
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Disabling termination protection: ${s}"
+            aws cloudformation update-termination-protection --stack-name "${s}" --no-enable-termination-protection || true
+          done
+
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Deleting stack: ${s}"
+            aws cloudformation delete-stack --stack-name "${s}" || true
+          done
+
+          for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+            echo "Waiting for delete-complete: ${s}"
+            aws cloudformation wait stack-delete-complete --stack-name "${s}" || true
+          done
+
+          echo "Orphan stack cleanup complete."
+
+      - name: Render eksctl cluster config (create only)
+        if: steps.preflight.outputs.cluster_exists != 'true'
+        run: |
+          set -euo pipefail
+          export CLUSTER_NAME AWS_REGION
+          envsubst < .github/eks/cluster.yaml > /tmp/cluster.yaml
+          echo "Rendered cluster config:"
+          cat /tmp/cluster.yaml
+
+      - name: Create EKS cluster (only if missing)
+        if: steps.preflight.outputs.cluster_exists != 'true'
+        run: |
+          set -euo pipefail
+          eksctl create cluster -f /tmp/cluster.yaml
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      - name: Configure kubectl for EKS
+        id: kubeconfig
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Deploy (ephemeral drill)
+        run: |
+          set -euo pipefail
+          kubectl apply -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}"
+          kubectl set image deployment/"${DEPLOYMENT_NAME}" api="${{ steps.image_plan.outputs.image_to_deploy }}" -n "${K8S_NAMESPACE}"
+          kubectl rollout status deployment/"${DEPLOYMENT_NAME}" -n "${K8S_NAMESPACE}" --timeout=600s
+
+      # ... keep your gate steps exactly as you have them ...
+
+      - name: Destroy EKS resources (only after successful drill unless kept; or on failure if opted-in)
+        if: always() && ((steps.post_deploy_gate.outputs.gate_rc == '0' && env.KEEP_CLUSTER_AFTER_SUCCESS != 'true') || env.DESTROY_ON_FAILURE == 'true')
+        run: |
+          set -euo pipefail
+
+          kubectl delete svc predictive-maintenance-svc -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete svc predictive-maintenance-service -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete -f infra/k8s/deployment.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+          kubectl delete -f infra/k8s/service.yaml -n "${K8S_NAMESPACE}" --ignore-not-found || true
+
+          if aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+            eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
+            exit 0
+          fi
+
+          STACKS="$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_IN_PROGRESS CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE ROLLBACK_IN_PROGRESS CREATE_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED DELETE_FAILED \
+            --query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
+            --output text || true)"
+
+          if [ -n "${STACKS}" ] && [ "${STACKS}" != "None" ]; then
+            for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+              aws cloudformation update-termination-protection --stack-name "${s}" --no-enable-termination-protection || true
+            done
+            for s in $(echo "${STACKS}" | tr '\t' '\n' | sort -r); do
+              aws cloudformation delete-stack --stack-name "${s}" || true
+              aws cloudformation wait stack-delete-complete --stack-name "${s}" || true
+            done
+          else
+            echo "No cluster and no stacks found. Nothing to delete."
+          fi

@@ -1,0 +1,13 @@
+{
+  "project_name": "Predictive Maintenance API with Real-Time Monitoring",
+  "project_slug": "predictive-maintenance-mlops",
+  "author_name": "Your Name",
+  "python_version": "3.11",
+  "_copy_without_render": [
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+    "**/*.pdf",
+    "**/*.db",
+    "**/*.sqlite"
+  ]
+}

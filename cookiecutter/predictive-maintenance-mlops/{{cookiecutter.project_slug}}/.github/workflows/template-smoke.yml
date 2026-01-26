@@ -1,0 +1,58 @@
+name: Template Smoke
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  template-smoke:
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install cookiecutter
+        run: |
+          python -m pip install --upgrade pip
+          pip install cookiecutter
+
+      - name: Generate project from template
+        env:
+          TEMPLATE_DIR: cookiecutter
+          OUT_DIR: ${{ runner.temp }}/generated
+          PROJECT_DIR: ${{ runner.temp }}/generated/generated-project
+        run: |
+          mkdir -p "$OUT_DIR"
+
+          # If your cookiecutter has defaults for all prompts, --no-input works.
+          # Otherwise, remove --no-input and provide a config/extra context.
+          cookiecutter "$TEMPLATE_DIR" --no-input --output-dir "$OUT_DIR"
+
+          # If cookiecutter generates a dynamic folder name, list it to find the actual one:
+          ls -la "$OUT_DIR"
+
+      - name: Install deps in generated project
+        working-directory: ${{ runner.temp }}/generated
+        run: |
+          # Replace "generated-project" with the actual folder name created by cookiecutter
+          PROJECT_DIR="$(find "$OUT_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          cd "$PROJECT_DIR"
+
+          make setup
+
+      - name: Test generated project
+        working-directory: ${{ runner.temp }}/generated/generated-project
+        run: |
+          make test
+
+      - name: Build docs in generated project
+        working-directory: ${{ runner.temp }}/generated/generated-project
+        run: |
+          make docs

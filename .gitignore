@@ -1,7 +1,12 @@
 # /CMaps
 /mlruns
-src/__pycache__/*
 mlflow.db
 .dvc
-actions-runner/*
+actions-runner
 artifacts/*
+.venv
+.mlruns
+docs/_build
+notebooks/mlruns
+__pycache__
+drift_report.html

@@ -1,0 +1,21 @@
+# params.yaml
+data:
+  raw_dir: "CMaps"
+  fd_sets: ["FD001", "FD002", "FD003", "FD004"]
+  val_size: 0.2
+  random_state: 42
+  target_col: "RUL"
+
+paths:
+  processed_dir: "artifacts/processed"
+
+training:
+  study_name: "cmapss_xgb_optuna"
+  n_trials: 30
+  timeout: null      # or e.g. 3600 for 1 hour max
+  random_state: 42
+
+mlflow:
+  tracking_uri: "http://127.0.0.1:5000"
+  experiment_name: "cmapss_rul_xgb_optuna"
+  registered_model_name: "cmapss_xgb_rul"

@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-latency-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: api-latency
+      rules:
+        - alert: ApiP95LatencyHigh
+          expr: >
+            histogram_quantile(
+              0.95,
+              sum(rate(http_request_latency_seconds_bucket{service="predictive-maintenance-api"}[5m])) by (le)
+            ) > 0.2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "API p95 latency is above 200ms"
+            description: "p95 latency exceeded 200ms for 5 minutes."

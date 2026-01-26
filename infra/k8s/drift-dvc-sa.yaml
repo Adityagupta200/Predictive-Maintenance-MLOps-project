@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drift-dvc-reader
+  namespace: default
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::519245966025:role/pm-drift-dvc-reader-role

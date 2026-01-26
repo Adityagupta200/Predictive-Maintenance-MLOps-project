@@ -1,0 +1,83 @@
+name: Notebook Smoke
+
+on:
+  # Run on all PRs
+  pull_request:
+
+  # Run on pushes to your main branch
+  push:
+    branches: [master]
+
+  # Optional: allow manual runs from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  notebook-smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Use a local file-based store in CI
+      MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+      MLFLOW_EXPERIMENT_NAME: predictive-maintenance-cmapss
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (incl. Jupyter)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          make setup
+          pip install nbconvert jupyter
+
+      - name: Execute notebooks
+        run: |
+          set -euo pipefail
+          mkdir -p notebooks/_executed
+
+          # Execute notebooks non-interactively.
+          # nbconvert supports setting per-cell timeout via ExecutePreprocessor.timeout. [web:775]
+          jupyter nbconvert --execute --to notebook \
+            --ExecutePreprocessor.timeout=1800 \
+            --output-dir notebooks/_executed \
+            notebooks/01_mlflow_experiments.ipynb
+
+          jupyter nbconvert --execute --to notebook \
+            --ExecutePreprocessor.timeout=1800 \
+            --output-dir notebooks/_executed \
+            notebooks/02_compare_runs.ipynb
+
+      - name: Assert MLflow runs exist
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          import mlflow
+
+          exp_name = os.environ["MLFLOW_EXPERIMENT_NAME"]
+
+          # Ensure the experiment exists (create it if notebook didn't).
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          mlflow.set_experiment(exp_name)
+
+          runs = mlflow.search_runs(experiment_names=[exp_name])
+          assert len(runs) > 0, f"No MLflow runs found for experiment={exp_name}"
+          print("Runs found:", len(runs))
+          PY
+
+      - name: Upload executed notebooks
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: executed-notebooks
+          path: notebooks/_executed
+
+      - name: Upload mlruns (optional)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mlruns
+          path: mlruns

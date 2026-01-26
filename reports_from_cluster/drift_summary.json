@@ -1,0 +1,12 @@
+{
+  "threshold": 0.2,
+  "max_psi": 0.26433578663601115,
+  "max_psi_feature": "engine_id",
+  "n_drifted_features": 1,
+  "drifted_features": {
+    "engine_id": 0.26433578663601115
+  },
+  "reference_rows": 128445,
+  "current_rows": 31914,
+  "html_report": "/app/reports/drift_report.html"
+}
