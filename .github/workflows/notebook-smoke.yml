@@ -27,13 +27,19 @@ jobs:
           make setup
           pip install nbconvert jupyter
 
+      - name: Clean MLflow store (CI only)
+        run: |
+          set -euo pipefail
+          rm -rf mlruns || true
+          mkdir -p mlruns
+
       - name: Prepare notebook inputs (generate artifacts)
         run: |
           set -euo pipefail
 
           mkdir -p artifacts/processed models
 
-          # 1) Try Makefile targets if they exist 
+          # Generate required local inputs for Notebook 01
           if [ ! -f artifacts/processed/train.csv ] || [ ! -f artifacts/processed/val.csv ]; then
             if make -n preprocess >/dev/null 2>&1; then
               make preprocess
@@ -48,65 +54,75 @@ jobs:
             fi
           fi
 
-          # 2) Fallback: try python modules if Make targets aren't available
-          if [ ! -f artifacts/processed/train.csv ] || [ ! -f artifacts/processed/val.csv ]; then
-            if [ -f params.yaml ]; then
-              python -m src.validate_data --config params.yaml || true
-              python -m src.data_preprocessing --config params.yaml || true
-            else
-              python -m src.validate_data || true
-              python -m src.data_preprocessing || true
-            fi
-          fi
+          # Hard fail with clear message if still missing
+          test -f artifacts/processed/train.csv || (echo "Missing artifacts/processed/train.csv" && exit 1)
+          test -f artifacts/processed/val.csv   || (echo "Missing artifacts/processed/val.csv" && exit 1)
+          test -f models/best_model.joblib      || (echo "Missing models/best_model.joblib" && exit 1)
 
-          if [ ! -f models/best_model.joblib ]; then
-            if [ -f params.yaml ]; then
-              python -m src.train_model --config params.yaml || true
-            else
-              python -m src.train_model || true
-            fi
-          fi
-
-          # 3) Hard fail with a clear message if still missing
-          test -f artifacts/processed/train.csv || (echo "Missing artifacts/processed/train.csv (pipeline didn't produce it)" && exit 1)
-          test -f artifacts/processed/val.csv   || (echo "Missing artifacts/processed/val.csv (pipeline didn't produce it)" && exit 1)
-          test -f models/best_model.joblib      || (echo "Missing models/best_model.joblib (training didn't produce it)" && exit 1)
-
-          # Export paths so the notebook uses these even if its cwd logic differs
+          # Export explicit paths for notebooks
           echo "TRAIN_CSV=${GITHUB_WORKSPACE}/artifacts/processed/train.csv" >> "$GITHUB_ENV"
           echo "VAL_CSV=${GITHUB_WORKSPACE}/artifacts/processed/val.csv" >> "$GITHUB_ENV"
           echo "MODEL_PATH=${GITHUB_WORKSPACE}/models/best_model.joblib" >> "$GITHUB_ENV"
 
-      - name: Execute notebooks
+      - name: Execute notebook 01 (logs MLflow runs)
         run: |
           set -euo pipefail
           mkdir -p notebooks/_executed
 
-          # nbconvert is a standard way to execute notebooks non-interactively. [web:775]
+          # nbconvert is the standard CLI approach to execute notebooks in CI. [web:775]
           jupyter nbconvert --execute --to notebook \
             --ExecutePreprocessor.timeout=1800 \
             --output-dir notebooks/_executed \
             notebooks/01_mlflow_experiments.ipynb
 
-          jupyter nbconvert --execute --to notebook \
-            --ExecutePreprocessor.timeout=1800 \
-            --output-dir notebooks/_executed \
-            notebooks/02_compare_runs.ipynb
-
-      - name: Assert MLflow runs exist
+      - name: Prune runs missing model artifact
         run: |
           set -euo pipefail
           python - << 'PY'
           import os
+          import shutil
+          from pathlib import Path
           import mlflow
 
-          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
-          mlflow.set_experiment(os.environ["MLFLOW_EXPERIMENT_NAME"])
+          tracking = os.environ["MLFLOW_TRACKING_URI"]
+          exp_name = os.environ["MLFLOW_EXPERIMENT_NAME"]
 
-          runs = mlflow.search_runs(experiment_names=[os.environ["MLFLOW_EXPERIMENT_NAME"]])
-          assert len(runs) > 0, "No MLflow runs found (notebooks may not have logged any runs)"
-          print("Runs found:", len(runs))
+          mlflow.set_tracking_uri(tracking)
+          exp = mlflow.get_experiment_by_name(exp_name)
+          if exp is None:
+            raise SystemExit(f"Experiment not found: {exp_name}")
+
+          # For file-based store, runs live under: mlruns/<exp_id>/<run_id>/
+          # We keep only runs that have artifacts/model/ because Notebook 02 loads runs:/{run_id}/model. [web:822]
+          exp_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "mlruns" / str(exp.experiment_id)
+          if not exp_dir.exists():
+            raise SystemExit(f"Experiment directory not found: {exp_dir}")
+
+          kept = 0
+          removed = 0
+          for run_dir in exp_dir.iterdir():
+            if not run_dir.is_dir():
+              continue
+            model_dir = run_dir / "artifacts" / "model"
+            if model_dir.exists():
+              kept += 1
+            else:
+              shutil.rmtree(run_dir, ignore_errors=True)
+              removed += 1
+
+          print(f"Pruned runs: removed={removed}, kept_with_model={kept}")
+          if kept == 0:
+            raise SystemExit("No MLflow runs with artifacts/model found; Notebook 01 didn't log a model at artifact_path='model'.")
           PY
+
+      - name: Execute notebook 02 (loads best model from MLflow)
+        run: |
+          set -euo pipefail
+
+          jupyter nbconvert --execute --to notebook \
+            --ExecutePreprocessor.timeout=1800 \
+            --output-dir notebooks/_executed \
+            notebooks/02_compare_runs.ipynb
 
       - name: Upload executed notebooks
         uses: actions/upload-artifact@v4
