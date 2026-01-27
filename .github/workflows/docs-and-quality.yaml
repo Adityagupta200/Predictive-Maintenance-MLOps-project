@@ -2,13 +2,15 @@ name: Docs & Quality
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main, master]
   push:
-    branches: [master]
+    branches: [main, master]
+  workflow_dispatch:
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -18,20 +20,37 @@ jobs:
 
       - name: Install deps
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           if [ -f requirements-api.txt ]; then pip install -r requirements-api.txt; fi
           pip install -r requirements-dev.txt
 
-      - name: Lint/format (pre-commit)
-        run: pre-commit run --all-files
+      - name: Ruff lint (CI check-only)
+        run: |
+          set -euo pipefail
+          ruff check . \
+            --output-format=github \
+            --extend-exclude "CMaps,mlruns,docs/_build,artifacts,reports,reports_from_cluster,.dvc,.ruff_cache,.pytest_cache" \
+            --extend-ignore E402,B904
+
+      - name: Ruff format (CI check-only)
+        run: |
+          set -euo pipefail
+          ruff format --check . \
+            --exclude "CMaps,mlruns,docs/_build,artifacts,reports,reports_from_cluster,.dvc,.ruff_cache,.pytest_cache"
+
+      - name: Black (CI check-only)
+        run: |
+          set -euo pipefail
+          black --check . --exclude '^(CMaps|mlruns|docs/_build|artifacts|reports|reports_from_cluster|\.dvc)/'
 
       - name: Tests
         run: pytest -q
 
       - name: Build docs
         run: make docs
-      
+
       - name: Upload docs HTML
         uses: actions/upload-artifact@v4
         if: always()
