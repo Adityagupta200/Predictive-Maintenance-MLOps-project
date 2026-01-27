@@ -104,7 +104,6 @@ jobs:
           python - << 'PY'
           import os
           from pathlib import Path
-          from urllib.parse import urlparse
 
           import joblib
           import mlflow
@@ -112,7 +111,6 @@ jobs:
           from mlflow.tracking import MlflowClient
 
           def run_has_model_artifact(client: MlflowClient, run_id: str, model_name: str) -> bool:
-              # List root-level artifacts and check presence of "model_name"
               artifacts = client.list_artifacts(run_id, path="")
               return any(a.path == model_name for a in artifacts)
 
@@ -126,18 +124,25 @@ jobs:
           if exp is None:
               raise SystemExit("Experiment not found (should have been created in previous step).")
 
-          # Check if any existing ACTIVE run already has the model artifact
+          # NOTE: Some MLflow versions don't accept lifecycle_stage filters in search_runs.
           runs = client.search_runs(
               experiment_ids=[exp.experiment_id],
-              filter_string="attributes.lifecycle_stage = 'active'",
-              order_by=["attributes.start_time DESC"],
+              filter_string="",  # keep empty for maximum compatibility
+              order_by=["start_time DESC"],
               max_results=200,
           )
-          if any(run_has_model_artifact(client, r.info.run_id, model_name) for r in runs):
+
+          # Keep only runs that are not deleted (if the field exists) and check artifacts
+          ok_runs = []
+          for r in runs:
+              stage = getattr(r.info, "lifecycle_stage", "active")
+              if stage != "deleted":
+                  ok_runs.append(r)
+
+          if any(run_has_model_artifact(client, r.info.run_id, model_name) for r in ok_runs):
               print("At least one run already has the model artifact; no fallback needed.")
               raise SystemExit(0)
 
-          # Otherwise create a fallback run that logs the model
           model_path = Path(os.environ["MODEL_PATH"])
           if not model_path.exists():
               raise SystemExit(f"MODEL_PATH does not exist: {model_path}")
@@ -147,20 +152,16 @@ jobs:
           with mlflow.start_run(run_name="ci-fallback-model") as run:
               mlflow.log_param("fallback_reason", "notebook_01_did_not_log_model")
 
-              # Prefer the new API (name=) to avoid artifact_path deprecation warnings.
+              # Prefer the new API (name=) when available.
               try:
                   mlflow.sklearn.log_model(model, name=model_name)
               except TypeError:
-                  # Backward compatibility if an older MLflow is used.
                   mlflow.sklearn.log_model(model, artifact_path=model_name)
 
               mlflow.log_metric("ci_fallback", 1.0)
-
               run_id = run.info.run_id
 
-          # Verify it actually exists via the tracking API
           if not run_has_model_artifact(client, run_id, model_name):
-              # Print artifact URI for debugging
               r = client.get_run(run_id)
               print(f"Fallback run artifact_uri={r.info.artifact_uri}")
               raise SystemExit(f"Fallback run did not produce '{model_name}' artifact as expected.")
@@ -185,7 +186,6 @@ jobs:
               return any(a.path == model_name for a in artifacts)
 
           def file_uri_to_path(uri: str) -> Path | None:
-              # Handle file:///... URIs (common for local artifact stores)
               if uri.startswith("file:"):
                   p = urlparse(uri).path
                   return Path(unquote(p))
@@ -199,10 +199,11 @@ jobs:
           client = MlflowClient()
           model_name = os.environ["MLFLOW_MODEL_NAME"]
 
+          # NOTE: Keep filter empty for MLflow compatibility.
           runs = client.search_runs(
               experiment_ids=[exp.experiment_id],
-              filter_string="attributes.lifecycle_stage = 'active'",
-              order_by=["attributes.start_time DESC"],
+              filter_string="",
+              order_by=["start_time DESC"],
               max_results=500,
           )
 
@@ -210,16 +211,18 @@ jobs:
           removed = 0
 
           for r in runs:
+              stage = getattr(r.info, "lifecycle_stage", "active")
+              if stage == "deleted":
+                  continue
+
               run_id = r.info.run_id
               if run_has_model_artifact(client, run_id, model_name):
                   kept += 1
                   continue
 
-              # Mark deleted in tracking store
               client.delete_run(run_id)
               removed += 1
 
-              # Best-effort delete artifact dir on disk (if local file URI)
               art_path = file_uri_to_path(r.info.artifact_uri)
               if art_path is not None and art_path.exists():
                   shutil.rmtree(art_path, ignore_errors=True)
