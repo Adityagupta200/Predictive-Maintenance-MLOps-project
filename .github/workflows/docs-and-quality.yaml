@@ -22,38 +22,70 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
+
           pip install -r requirements.txt
           if [ -f requirements-api.txt ]; then pip install -r requirements-api.txt; fi
           pip install -r requirements-dev.txt
+
+          # Safety: ensure tooling exists even if requirements-dev.txt changes later.
+          python -m pip install --upgrade ruff black
 
       - name: Ruff lint (CI check-only)
         run: |
           set -euo pipefail
           ruff check . \
             --output-format=github \
-            --extend-exclude "CMaps,mlruns,docs/_build,artifacts,reports,reports_from_cluster,.dvc,.ruff_cache,.pytest_cache" \
-            --extend-ignore E402,B904
+            --extend-ignore E402,B904 \
+            --extend-exclude "CMaps,mlruns,artifacts,reports,reports_from_cluster,docs/_build,docs/build,.dvc,.ruff_cache,.pytest_cache,notebooks,cookiecutter"
 
       - name: Ruff format (CI check-only)
         run: |
           set -euo pipefail
           ruff format --check . \
-            --exclude "CMaps,mlruns,docs/_build,artifacts,reports,reports_from_cluster,.dvc,.ruff_cache,.pytest_cache"
+            --exclude "CMaps,mlruns,artifacts,reports,reports_from_cluster,docs/_build,docs/build,.dvc,.ruff_cache,.pytest_cache,notebooks,cookiecutter"
 
       - name: Black (CI check-only)
         run: |
           set -euo pipefail
-          black --check . --exclude '^(CMaps|mlruns|docs/_build|artifacts|reports|reports_from_cluster|\.dvc)/'
+          black --check . \
+            --exclude '^(CMaps|mlruns|artifacts|reports|reports_from_cluster|docs/_build|docs/build|notebooks|cookiecutter|\.dvc)/'
 
       - name: Tests
-        run: pytest -q
+        run: |
+          set -euo pipefail
+          pytest -q
 
       - name: Build docs
-        run: make docs
+        run: |
+          set -euo pipefail
+
+          # Prefer your repo’s Makefile target if present.
+          if make -n docs >/dev/null 2>&1; then
+            make docs
+          elif [ -f docs/Makefile ]; then
+            make -C docs html
+          else
+            # Last resort fallback (keeps workflow resilient)
+            python -m pip install --upgrade sphinx
+            sphinx-build -b html docs/source docs/_build/html
+          fi
+
+          # Fail early with a clear message if docs still didn't build.
+          if [ -d docs/_build/html ]; then
+            echo "Docs built at docs/_build/html"
+          elif [ -d docs/build/html ]; then
+            echo "Docs built at docs/build/html"
+          else
+            echo "ERROR: Sphinx HTML output directory not found (expected docs/_build/html or docs/build/html)."
+            exit 1
+          fi
 
       - name: Upload docs HTML
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sphinx-html
-          path: docs/_build/html
+          path: |
+            docs/_build/html
+            docs/build/html
+          if-no-files-found: warn

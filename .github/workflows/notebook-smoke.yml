@@ -10,9 +10,12 @@ jobs:
   notebook-smoke:
     runs-on: ubuntu-latest
     env:
-      MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+      # Use sqlite backend to avoid the file-store deprecation warning.
+      # Artifacts will still be stored locally under MLFLOW_ARTIFACT_ROOT.
+      MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/mlflow.db
       MLFLOW_EXPERIMENT_NAME: predictive-maintenance-cmapss
-      MLFLOW_MODEL_ARTIFACT_PATH: model
+      MLFLOW_MODEL_NAME: model
+      MLFLOW_ARTIFACT_ROOT: ${{ github.workspace }}/mlflow-artifacts
 
     steps:
       - uses: actions/checkout@v4
@@ -21,18 +24,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (incl. Jupyter)
+      - name: Install deps (incl. Jupyter + MLflow helpers)
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           make setup
-          python -m pip install nbconvert jupyter ipykernel
+          python -m pip install nbconvert jupyter ipykernel mlflow joblib
 
-      - name: Clean MLflow store (CI only)
+      - name: Clean MLflow state (CI only)
         run: |
           set -euo pipefail
-          rm -rf mlruns || true
-          mkdir -p mlruns
+          rm -f mlflow.db || true
+          rm -rf "$MLFLOW_ARTIFACT_ROOT" || true
+          mkdir -p "$MLFLOW_ARTIFACT_ROOT"
 
       - name: Prepare notebook inputs (generate artifacts)
         run: |
@@ -73,37 +77,67 @@ jobs:
             --output-dir notebooks/_executed \
             notebooks/01_mlflow_experiments.ipynb
 
+      - name: Ensure experiment exists with artifact root
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          import os
+          from pathlib import Path
+          import mlflow
+
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+
+          name = os.environ["MLFLOW_EXPERIMENT_NAME"]
+          artifact_root = Path(os.environ["MLFLOW_ARTIFACT_ROOT"]).resolve()
+
+          exp = mlflow.get_experiment_by_name(name)
+          if exp is None:
+              exp_id = mlflow.create_experiment(name, artifact_location=str(artifact_root))
+              print(f"Created experiment: {name} ({exp_id}) with artifact_location={artifact_root}")
+          else:
+              print(f"Experiment exists: {name} ({exp.experiment_id}) artifact_location={exp.artifact_location}")
+          PY
+
       - name: Ensure at least one run has a logged model (fallback if Notebook 01 didn't)
         run: |
           set -euo pipefail
           python - << 'PY'
           import os
           from pathlib import Path
+          from urllib.parse import urlparse
 
           import joblib
           import mlflow
           import mlflow.sklearn
+          from mlflow.tracking import MlflowClient
+
+          def run_has_model_artifact(client: MlflowClient, run_id: str, model_name: str) -> bool:
+              # List root-level artifacts and check presence of "model_name"
+              artifacts = client.list_artifacts(run_id, path="")
+              return any(a.path == model_name for a in artifacts)
 
           mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
           mlflow.set_experiment(os.environ["MLFLOW_EXPERIMENT_NAME"])
 
+          model_name = os.environ["MLFLOW_MODEL_NAME"]
+          client = MlflowClient()
+
           exp = mlflow.get_experiment_by_name(os.environ["MLFLOW_EXPERIMENT_NAME"])
           if exp is None:
-              raise SystemExit("Experiment not found")
+              raise SystemExit("Experiment not found (should have been created in previous step).")
 
-          exp_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "mlruns" / str(exp.experiment_id)
-
-          artifact_path = os.environ["MLFLOW_MODEL_ARTIFACT_PATH"]
-          kept = 0
-          if exp_dir.exists():
-              for run_dir in exp_dir.iterdir():
-                  if run_dir.is_dir() and (run_dir / "artifacts" / artifact_path).exists():
-                      kept += 1
-
-          if kept > 0:
-              print(f"Runs with model already present: {kept}")
+          # Check if any existing ACTIVE run already has the model artifact
+          runs = client.search_runs(
+              experiment_ids=[exp.experiment_id],
+              filter_string="attributes.lifecycle_stage = 'active'",
+              order_by=["attributes.start_time DESC"],
+              max_results=200,
+          )
+          if any(run_has_model_artifact(client, r.info.run_id, model_name) for r in runs):
+              print("At least one run already has the model artifact; no fallback needed.")
               raise SystemExit(0)
 
+          # Otherwise create a fallback run that logs the model
           model_path = Path(os.environ["MODEL_PATH"])
           if not model_path.exists():
               raise SystemExit(f"MODEL_PATH does not exist: {model_path}")
@@ -112,48 +146,87 @@ jobs:
 
           with mlflow.start_run(run_name="ci-fallback-model") as run:
               mlflow.log_param("fallback_reason", "notebook_01_did_not_log_model")
-              mlflow.sklearn.log_model(model, artifact_path=artifact_path)
+
+              # Prefer the new API (name=) to avoid artifact_path deprecation warnings.
+              try:
+                  mlflow.sklearn.log_model(model, name=model_name)
+              except TypeError:
+                  # Backward compatibility if an older MLflow is used.
+                  mlflow.sklearn.log_model(model, artifact_path=model_name)
+
               mlflow.log_metric("ci_fallback", 1.0)
 
-          print(f"Created fallback run with model: {run.info.run_id}")
+              run_id = run.info.run_id
+
+          # Verify it actually exists via the tracking API
+          if not run_has_model_artifact(client, run_id, model_name):
+              # Print artifact URI for debugging
+              r = client.get_run(run_id)
+              print(f"Fallback run artifact_uri={r.info.artifact_uri}")
+              raise SystemExit(f"Fallback run did not produce '{model_name}' artifact as expected.")
+
+          print(f"Created fallback run with model: {run_id}")
           PY
 
-      - name: Prune runs missing model artifact
+      - name: Prune runs missing model artifact (API-based; backend-agnostic)
         run: |
           set -euo pipefail
           python - << 'PY'
           import os
           import shutil
           from pathlib import Path
+          from urllib.parse import urlparse, unquote
 
           import mlflow
+          from mlflow.tracking import MlflowClient
 
-          artifact_path = os.environ["MLFLOW_MODEL_ARTIFACT_PATH"]
+          def run_has_model_artifact(client: MlflowClient, run_id: str, model_name: str) -> bool:
+              artifacts = client.list_artifacts(run_id, path="")
+              return any(a.path == model_name for a in artifacts)
+
+          def file_uri_to_path(uri: str) -> Path | None:
+              # Handle file:///... URIs (common for local artifact stores)
+              if uri.startswith("file:"):
+                  p = urlparse(uri).path
+                  return Path(unquote(p))
+              return None
 
           mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
           exp = mlflow.get_experiment_by_name(os.environ["MLFLOW_EXPERIMENT_NAME"])
           if exp is None:
               raise SystemExit("Experiment not found")
 
-          exp_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "mlruns" / str(exp.experiment_id)
-          if not exp_dir.exists():
-              raise SystemExit(f"Experiment directory not found: {exp_dir}")
+          client = MlflowClient()
+          model_name = os.environ["MLFLOW_MODEL_NAME"]
+
+          runs = client.search_runs(
+              experiment_ids=[exp.experiment_id],
+              filter_string="attributes.lifecycle_stage = 'active'",
+              order_by=["attributes.start_time DESC"],
+              max_results=500,
+          )
 
           kept = 0
           removed = 0
-          for run_dir in exp_dir.iterdir():
-              if not run_dir.is_dir():
-                  continue
-              model_dir = run_dir / "artifacts" / artifact_path
-              if model_dir.exists():
+
+          for r in runs:
+              run_id = r.info.run_id
+              if run_has_model_artifact(client, run_id, model_name):
                   kept += 1
-              else:
-                  shutil.rmtree(run_dir, ignore_errors=True)
-                  removed += 1
+                  continue
+
+              # Mark deleted in tracking store
+              client.delete_run(run_id)
+              removed += 1
+
+              # Best-effort delete artifact dir on disk (if local file URI)
+              art_path = file_uri_to_path(r.info.artifact_uri)
+              if art_path is not None and art_path.exists():
+                  shutil.rmtree(art_path, ignore_errors=True)
 
           print(f"Pruned runs: removed={removed}, kept_with_model={kept}")
           if kept == 0:
-              raise SystemExit(f"No MLflow runs with artifacts/{artifact_path} found after fallback.")
+              raise SystemExit(f"No MLflow runs with artifacts/{model_name} found after fallback.")
           PY
 
       - name: Execute notebook 02 (loads best model from MLflow)
@@ -171,9 +244,11 @@ jobs:
           name: executed-notebooks
           path: notebooks/_executed
 
-      - name: Upload mlruns
+      - name: Upload MLflow artifacts + DB
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mlruns
-          path: mlruns
+          name: mlflow-tracking
+          path: |
+            mlflow.db
+            mlflow-artifacts
