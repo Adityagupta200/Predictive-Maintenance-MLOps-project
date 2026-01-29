@@ -3,7 +3,6 @@
 mlflow.db
 .dvc
 actions-runner
-artifacts/*
 .venv
 .mlruns
 docs/_build
