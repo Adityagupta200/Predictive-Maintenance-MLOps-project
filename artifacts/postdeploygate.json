@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "base_url": "http://127.0.0.1:18000",
+  "checks": {
+    "health_ok": true,
+    "latency_ok": true,
+    "r2_ok": true,
+    "n_requests": 200,
+    "p95_ms": 93.55265999997754,
+    "p95_ms_max": 200.0,
+    "r2": 0.9975875246449711,
+    "r2_min": 0.9
+  },
+  "error": null
+}
