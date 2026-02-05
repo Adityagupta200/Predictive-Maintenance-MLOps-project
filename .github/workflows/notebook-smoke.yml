@@ -10,13 +10,13 @@ jobs:
   notebook-smoke:
     runs-on: ubuntu-latest
     env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ap-south-1
+
       MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/mlflow.db
       MLFLOW_EXPERIMENT_NAME: predictive-maintenance-cmapss
-
-      # Notebook 02 expects runs:/{run_id}/model
       MLFLOW_MODEL_NAME: model
-
-      # Keep artifacts outside repo noise
       MLFLOW_ARTIFACT_ROOT: ${{ github.workspace }}/mlflow-artifacts
 
     steps:
@@ -31,7 +31,15 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           make setup
+          # Register kernel for the notebook
           python -m pip install nbconvert jupyter ipykernel mlflow joblib
+          python -m ipykernel install --user --name=python3
+
+      - name: Pull Data from DVC
+        run: |
+          # Ensure dvc with s3 support is installed
+          pip install "dvc[s3]"
+          dvc pull
 
       - name: Clean MLflow state (CI only)
         run: |
@@ -71,6 +79,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/processed models
 
+          # If processed data is missing, try to generate it
           if [ ! -f artifacts/processed/train.csv ] || [ ! -f artifacts/processed/val.csv ]; then
             if make -n preprocess >/dev/null 2>&1; then
               make preprocess
@@ -99,6 +108,7 @@ jobs:
           mkdir -p notebooks/_executed
           jupyter nbconvert --execute --to notebook \
             --ExecutePreprocessor.timeout=1800 \
+            --ExecutePreprocessor.kernel_name=python3 \
             --output-dir notebooks/_executed \
             notebooks/01_mlflow_experiments.ipynb
 
@@ -115,11 +125,9 @@ jobs:
           from mlflow.tracking import MlflowClient
 
           def run_has_model_dir(client: MlflowClient, run_id: str, model_name: str) -> bool:
-              # Strategy A: root listing contains "model" dir
               root = client.list_artifacts(run_id, path="")
               if any(a.path == model_name for a in root):
                   return True
-              # Strategy B: listing inside "model" returns something (works even if root list omits dirs)
               inner = client.list_artifacts(run_id, path=model_name)
               return len(inner) > 0
 
@@ -157,7 +165,6 @@ jobs:
           with mlflow.start_run(run_name="ci-fallback-model") as run:
               mlflow.log_param("fallback_reason", "notebook_01_did_not_log_model")
 
-              # Prefer new API if supported, but ALWAYS ensure it ends up under "model".
               logged_ok = False
               try:
                   mlflow.sklearn.log_model(model, name=model_name)
@@ -174,8 +181,6 @@ jobs:
           if not run_has_model_dir(client, run_id, model_name):
               r = client.get_run(run_id)
               print(f"Fallback run artifact_uri={r.info.artifact_uri}")
-              # Extra debugging: show what artifacts DO exist
-              print("Root artifacts:", [a.path for a in client.list_artifacts(run_id, path="")])
               raise SystemExit(f"Fallback run did not produce '{model_name}' artifact as expected.")
 
           print(f"Created fallback run with model: {run_id}")
@@ -204,7 +209,6 @@ jobs:
               if uri.startswith("file:"):
                   p = urlparse(uri).path
                   return Path(unquote(p))
-              # If it's an absolute path (some local setups), allow cleanup
               p = Path(uri)
               return p if p.is_absolute() else None
 
