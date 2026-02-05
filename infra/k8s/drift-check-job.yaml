@@ -22,7 +22,7 @@ spec:
 
       initContainers:
         - name: fetch-artifacts
-          image: ${DRIFT_IMAGE}
+          image: ${DOCKER_IMAGE}
           imagePullPolicy: Always
           workingDir: /app
           env:
@@ -31,7 +31,7 @@ spec:
             - name: DVC_REMOTE_NAME
               value: s3remote
             - name: DVC_REMOTE_URL
-              value: s3://${DVC_BUCKET_NAME}/${DVC_REMOTE_PREFIX}
+              value: s3://${BUCKET_NAME}/${DVC_REMOTE_PREFIX}
           command: ["bash", "-lc"]
           args:
             - |
@@ -54,7 +54,7 @@ spec:
 
       containers:
         - name: drift
-          image: ${DRIFT_IMAGE}
+          image: ${DOCKER_IMAGE}
           imagePullPolicy: Always
           workingDir: /app
           env:

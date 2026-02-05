@@ -9,3 +9,7 @@ docs/_build
 notebooks/mlruns
 __pycache__
 drift_report.html
+_executed
+.ipynb_checkpoints
+!docs/_build/index.html
+infra/terraform/tfplan

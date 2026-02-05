@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: adityagupta20/predictive-maintenance-api:v1
+          image: ${DOCKER_IMAGE}
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000

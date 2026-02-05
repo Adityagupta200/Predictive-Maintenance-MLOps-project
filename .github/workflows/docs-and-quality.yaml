@@ -30,8 +30,7 @@ jobs:
           # Safety: ensure tooling exists even if requirements-dev.txt changes later.
           python -m pip install --upgrade ruff black
 
-      # CI-friendly: auto-fix style issues in the runner so tests/docs can proceed.
-      - name: Ruff auto-fix (imports, unused imports, etc.)
+      - name: Ruff auto-fix 
         run: |
           set -euo pipefail
           ruff check . \
@@ -45,14 +44,13 @@ jobs:
           ruff format . \
             --exclude "CMaps,mlruns,artifacts,reports,reports_from_cluster,docs/_build,docs/build,.dvc,.ruff_cache,.pytest_cache,notebooks,cookiecutter"
 
-      - name: Black format (keeps formatting consistent if you still rely on Black)
+      - name: Black format
         run: |
           set -euo pipefail
           black . \
             --exclude '^(CMaps|mlruns|artifacts|reports|reports_from_cluster|docs/_build|docs/build|notebooks|cookiecutter|\.dvc)/'
 
-      # Optional: after auto-fix/format, verify clean (should now pass).
-      - name: Ruff lint (verify)
+      - name: Ruff lint
         run: |
           set -euo pipefail
           ruff check . \
