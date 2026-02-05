@@ -1,0 +1,386 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API Reference &mdash; Predictive Maintenance MLOps  documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Runbook" href="runbook.html" />
+    <link rel="prev" title="Pipeline" href="pipeline.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            Predictive Maintenance MLOps
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="pipeline.html">Pipeline</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.api.main">FastAPI app and endpoints</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.main.health_check"><code class="docutils literal notranslate"><span class="pre">health_check()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.main.metrics"><code class="docutils literal notranslate"><span class="pre">metrics()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.main.predict_batch"><code class="docutils literal notranslate"><span class="pre">predict_batch()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.main.predict_single"><code class="docutils literal notranslate"><span class="pre">predict_single()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.api.observability">Observability (Prometheus + audit logs)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.observability.RequestContextMiddleware"><code class="docutils literal notranslate"><span class="pre">RequestContextMiddleware</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.observability.RequestContextMiddleware.dispatch"><code class="docutils literal notranslate"><span class="pre">RequestContextMiddleware.dispatch()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.observability.audit_prediction_event"><code class="docutils literal notranslate"><span class="pre">audit_prediction_event()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.observability.observe_inference_latency"><code class="docutils literal notranslate"><span class="pre">observe_inference_latency()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.observability.setup_logging"><code class="docutils literal notranslate"><span class="pre">setup_logging()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.api.schemas">Schemas</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.schemas.BatchPredictionResponse"><code class="docutils literal notranslate"><span class="pre">BatchPredictionResponse</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.BatchPredictionResponse.model_config"><code class="docutils literal notranslate"><span class="pre">BatchPredictionResponse.model_config</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.BatchPredictionResponse.predictions"><code class="docutils literal notranslate"><span class="pre">BatchPredictionResponse.predictions</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.schemas.PredictionRequest"><code class="docutils literal notranslate"><span class="pre">PredictionRequest</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.PredictionRequest.features"><code class="docutils literal notranslate"><span class="pre">PredictionRequest.features</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.PredictionRequest.model_config"><code class="docutils literal notranslate"><span class="pre">PredictionRequest.model_config</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#src.api.schemas.PredictionResponse"><code class="docutils literal notranslate"><span class="pre">PredictionResponse</span></code></a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.PredictionResponse.model_config"><code class="docutils literal notranslate"><span class="pre">PredictionResponse.model_config</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#src.api.schemas.PredictionResponse.prediction"><code class="docutils literal notranslate"><span class="pre">PredictionResponse.prediction</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.monitoring.drift_check">Drift monitoring job</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#src.monitoring.drift_check.compute_psi_by_col"><code class="docutils literal notranslate"><span class="pre">compute_psi_by_col()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.monitoring.drift_check.main"><code class="docutils literal notranslate"><span class="pre">main()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#src.monitoring.drift_check.psi_numeric"><code class="docutils literal notranslate"><span class="pre">psi_numeric()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="runbook.html">Runbook</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">Predictive Maintenance MLOps</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">API Reference</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/api.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="api-reference">
+<h1>API Reference<a class="headerlink" href="#api-reference" title="Link to this heading"></a></h1>
+<section id="module-src.api.main">
+<span id="fastapi-app-and-endpoints"></span><h2>FastAPI app and endpoints<a class="headerlink" href="#module-src.api.main" title="Link to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.main.health_check">
+<span class="sig-prename descclassname"><span class="pre">src.api.main.</span></span><span class="sig-name descname"><span class="pre">health_check</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/main.html#health_check"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.main.health_check" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.main.metrics">
+<span class="sig-prename descclassname"><span class="pre">src.api.main.</span></span><span class="sig-name descname"><span class="pre">metrics</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/main.html#metrics"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.main.metrics" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.main.predict_batch">
+<span class="sig-prename descclassname"><span class="pre">src.api.main.</span></span><span class="sig-name descname"><span class="pre">predict_batch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">payloads</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">request</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/main.html#predict_batch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.main.predict_batch" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>payloads</strong> (<em>List</em><em>[</em><a class="reference internal" href="#src.api.schemas.PredictionRequest" title="src.api.schemas.PredictionRequest"><em>PredictionRequest</em></a><em>]</em>)</p></li>
+<li><p><strong>request</strong> (<em>Request</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.main.predict_single">
+<span class="sig-prename descclassname"><span class="pre">src.api.main.</span></span><span class="sig-name descname"><span class="pre">predict_single</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">payload</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">request</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/main.html#predict_single"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.main.predict_single" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>payload</strong> (<a class="reference internal" href="#src.api.schemas.PredictionRequest" title="src.api.schemas.PredictionRequest"><em>PredictionRequest</em></a>)</p></li>
+<li><p><strong>request</strong> (<em>Request</em>)</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="module-src.api.observability">
+<span id="observability-prometheus-audit-logs"></span><h2>Observability (Prometheus + audit logs)<a class="headerlink" href="#module-src.api.observability" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.api.observability.RequestContextMiddleware">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.api.observability.</span></span><span class="sig-name descname"><span class="pre">RequestContextMiddleware</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">app</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">header_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'X-Request-ID'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/observability.html#RequestContextMiddleware"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.observability.RequestContextMiddleware" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">BaseHTTPMiddleware</span></code></p>
+<p>Adds X-Request-ID and emits request metrics.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>app</strong> (<em>Callable</em><em>[</em><em>[</em><em>MutableMapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>, </em><em>Callable</em><em>[</em><em>[</em><em>]</em><em>, </em><em>Awaitable</em><em>[</em><em>MutableMapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>]</em><em>, </em><em>Callable</em><em>[</em><em>[</em><em>MutableMapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em><em>, </em><em>Awaitable</em><em>[</em><em>None</em><em>]</em><em>]</em><em>]</em><em>, </em><em>Awaitable</em><em>[</em><em>None</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>header_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.api.observability.RequestContextMiddleware.dispatch">
+<em class="property"><span class="pre">async</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dispatch</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">request</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">call_next</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/observability.html#RequestContextMiddleware.dispatch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.observability.RequestContextMiddleware.dispatch" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>request</strong> (<em>Request</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.observability.audit_prediction_event">
+<span class="sig-prename descclassname"><span class="pre">src.api.observability.</span></span><span class="sig-name descname"><span class="pre">audit_prediction_event</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">request_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_version</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">latency_ms</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inputs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error_type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/observability.html#audit_prediction_event"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.observability.audit_prediction_event" title="Link to this definition"></a></dt>
+<dd><p>Audit trail log line: prediction inputs + outputs (+ errors).
+Keep it JSON for easy ingestion into Loki/ELK later.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>request_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_version</strong> (<em>str</em>)</p></li>
+<li><p><strong>latency_ms</strong> (<em>float</em>)</p></li>
+<li><p><strong>inputs</strong> (<em>Dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>output</strong> (<em>Dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>error_type</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.observability.observe_inference_latency">
+<span class="sig-prename descclassname"><span class="pre">src.api.observability.</span></span><span class="sig-name descname"><span class="pre">observe_inference_latency</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_version</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">outcome</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">seconds</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/observability.html#observe_inference_latency"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.observability.observe_inference_latency" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model_version</strong> (<em>str</em>)</p></li>
+<li><p><strong>outcome</strong> (<em>str</em>)</p></li>
+<li><p><strong>seconds</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.api.observability.setup_logging">
+<span class="sig-prename descclassname"><span class="pre">src.api.observability.</span></span><span class="sig-name descname"><span class="pre">setup_logging</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/observability.html#setup_logging"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.observability.setup_logging" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="module-src.api.schemas">
+<span id="schemas"></span><h2>Schemas<a class="headerlink" href="#module-src.api.schemas" title="Link to this heading"></a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.api.schemas.BatchPredictionResponse">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.api.schemas.</span></span><span class="sig-name descname"><span class="pre">BatchPredictionResponse</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">predictions</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/schemas.html#BatchPredictionResponse"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.schemas.BatchPredictionResponse" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">BaseModel</span></code></p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>predictions</strong> (<em>List</em><em>[</em><em>float</em><em>]</em>)</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.BatchPredictionResponse.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">ConfigDict</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.api.schemas.BatchPredictionResponse.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.BatchPredictionResponse.predictions">
+<span class="sig-name descname"><span class="pre">predictions</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">List</span><span class="p"><span class="pre">[</span></span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#src.api.schemas.BatchPredictionResponse.predictions" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionRequest">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.api.schemas.</span></span><span class="sig-name descname"><span class="pre">PredictionRequest</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">features</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/schemas.html#PredictionRequest"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.schemas.PredictionRequest" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">BaseModel</span></code></p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>features</strong> (<em>Dict</em><em>[</em><em>str</em><em>, </em><em>float</em><em>]</em>)</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionRequest.features">
+<span class="sig-name descname"><span class="pre">features</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#src.api.schemas.PredictionRequest.features" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionRequest.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">ConfigDict</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.api.schemas.PredictionRequest.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionResponse">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.api.schemas.</span></span><span class="sig-name descname"><span class="pre">PredictionResponse</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prediction</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/api/schemas.html#PredictionResponse"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.api.schemas.PredictionResponse" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">BaseModel</span></code></p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>prediction</strong> (<em>float</em>)</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionResponse.model_config">
+<span class="sig-name descname"><span class="pre">model_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ClassVar</span><span class="p"><span class="pre">[</span></span><span class="pre">ConfigDict</span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.api.schemas.PredictionResponse.model_config" title="Link to this definition"></a></dt>
+<dd><p>Configuration for the model, should be a dictionary conforming to [<cite>ConfigDict</cite>][pydantic.config.ConfigDict].</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.api.schemas.PredictionResponse.prediction">
+<span class="sig-name descname"><span class="pre">prediction</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">float</span></em><a class="headerlink" href="#src.api.schemas.PredictionResponse.prediction" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.monitoring.drift_check">
+<span id="drift-monitoring-job"></span><h2>Drift monitoring job<a class="headerlink" href="#module-src.monitoring.drift_check" title="Link to this heading"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="src.monitoring.drift_check.compute_psi_by_col">
+<span class="sig-prename descclassname"><span class="pre">src.monitoring.drift_check.</span></span><span class="sig-name descname"><span class="pre">compute_psi_by_col</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ref_df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cur_df</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/monitoring/drift_check.html#compute_psi_by_col"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.monitoring.drift_check.compute_psi_by_col" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ref_df</strong> (<em>DataFrame</em>)</p></li>
+<li><p><strong>cur_df</strong> (<em>DataFrame</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Dict</em>[str, float]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.monitoring.drift_check.main">
+<span class="sig-prename descclassname"><span class="pre">src.monitoring.drift_check.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/monitoring/drift_check.html#main"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.monitoring.drift_check.main" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.monitoring.drift_check.psi_numeric">
+<span class="sig-prename descclassname"><span class="pre">src.monitoring.drift_check.</span></span><span class="sig-name descname"><span class="pre">psi_numeric</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ref</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cur</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bins</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">eps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-06</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/src/monitoring/drift_check.html#psi_numeric"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#src.monitoring.drift_check.psi_numeric" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ref</strong> (<em>Series</em>)</p></li>
+<li><p><strong>cur</strong> (<em>Series</em>)</p></li>
+<li><p><strong>bins</strong> (<em>int</em>)</p></li>
+<li><p><strong>eps</strong> (<em>float</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>float</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="pipeline.html" class="btn btn-neutral float-left" title="Pipeline" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="runbook.html" class="btn btn-neutral float-right" title="Runbook" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright .</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
