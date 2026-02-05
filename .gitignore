@@ -11,5 +11,5 @@ __pycache__
 drift_report.html
 _executed
 .ipynb_checkpoints
-!docs/_build/index.html
+!docs/_build/html/index.html
 infra/terraform/tfplan
