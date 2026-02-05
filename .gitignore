@@ -5,11 +5,13 @@ mlflow.db
 actions-runner
 .venv
 .mlruns
-docs/_build
+docs/_build/**
+!docs/_build/
+!docs/_build/html/
+!docs/_build/html/index.html
 notebooks/mlruns
 __pycache__
 drift_report.html
 _executed
 .ipynb_checkpoints
-!docs/_build/html/index.html
 infra/terraform/tfplan
