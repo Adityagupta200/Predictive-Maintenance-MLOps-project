@@ -212,7 +212,7 @@ Comprehensive MLOps project implementing end-to-end ML pipeline for predictive m
 
 Generated `artifacts/processed/data_validation.json`, `train.csv`, `val.csv`.
 
-![ls -lah artifacts/processed](image-6.png)
+![ls -lah artifacts/processed](./pngs/image-6.png)
 *Generated artifacts from training*
 
 Commands: `ls -lah artifacts/processed`; `cat artifacts/processed/data_validation.json` 
@@ -221,11 +221,11 @@ Commands: `ls -lah artifacts/processed`; `cat artifacts/processed/data_validatio
 
 Trained model saved as `models/best_model.joblib`.
 
-![ls -lah models](image-7.png)
+![ls -lah models](./pngs/image-7.png)
 
 *Trained models*
 
-![model prediction](terraform_predict_output-1.png)
+![model prediction](./pngs/terraform_predict_output-1.png)
 *Model predictions*
 
 Commands: `ls -lah models`; `python -c "import joblib; m = joblib.load('models/best_model.joblib'); print(type(m))"` 
@@ -234,8 +234,7 @@ Commands: `ls -lah models`; `python -c "import joblib; m = joblib.load('models/b
 
 Experiments tracked in MLflow UI; exported `notebooks/artifacts/runs_leaderboard.csv`.
 
-**Attach screenshot of MLflow UI runs list here as proof.**
-![MLFlow UI runs list](<screenshot of MLflow UI runs list-2.png>)
+![MLFlow UI runs list](pngs\mlflow-ui.png)
 *MLFlow UI runs list*
 
 Commands: `ls -lah notebooks/artifacts`; `head -n 20 notebooks/artifacts/runs_leaderboard.csv` 
@@ -244,10 +243,11 @@ Commands: `ls -lah notebooks/artifacts`; `head -n 20 notebooks/artifacts/runs_le
 
 Versioned with `dvc.yaml`, `dvc.lock`; supports S3 remote.
 
-![dvc dag](<dvc dag output-1.png>)
+![dvc dag](./pngs/dvc_dag_output-1.png)
+
 *Output of "dvc dag"*
 
-![dvc status --cloud](image-8.png)
+![dvc status --cloud](./pngs/image-8.png)
 *Output of "dvc status --cloud"*
 
 Commands: `dvc dag`; `dvc status --cloud`; `dvc repro` 
@@ -258,10 +258,10 @@ Commands: `dvc dag`; `dvc status --cloud`; `dvc repro`
 
 API runs with health/metrics endpoints.
 
-![terraform get health](terraform_get_health-2.png)
+![terraform get health](./pngs/terraform_get_health-2.png)
 *Health check of deployed production link*
 
-![Deployed link predict endpoint check](terraform_predict_output-2.png)
+![Deployed link predict endpoint check](./pngs/terraform_predict_output-2.png)
 *Deployed link predict endpoint check*
 
 Commands: `docker build -t pm-api-local -f DockerFile .`; `docker run --rm -p 8000:8000 pm-api-local`; `curl -fsS http://127.0.0.1:8000/health`; `curl -fsS http://127.0.0.1:8000/metrics | head` 
@@ -270,13 +270,13 @@ Commands: `docker build -t pm-api-local -f DockerFile .`; `docker run --rm -p 80
 
 Deployed to EKS cluster; in-cluster smoke test passed.
 
-![kubectl get pods -o wide](<kubectl get pods-2.png>)
+![kubectl get pods -o wide](./pngs/kubectl-get-pods-2.png)
 *Running pod in EKS cluster*
 
-![In-cluster smoke test](<kubectl -n $K8SNAMESPACE logs svc-smoke-1.png>)
+![In-cluster smoke test](./pngs/k8s.png)
 *In-cluster smoke test*
 
-![Deployment rollout](<kubectl rollout history after-1.png>)
+![Deployment rollout](./pngs/kubectl_rollout_history_after_1.png)
 *Deployment rollout*
 
 Commands: `kubectl -n default get pods -o wide`; `kubectl -n default rollout status deployment/predictive-maintenance-api`; `kubectl -n default logs svc-smoke` 
@@ -285,7 +285,7 @@ Commands: `kubectl -n default get pods -o wide`; `kubectl -n default rollout sta
 
 IaC applied successfully.
 
-![Public IP for running API](terraform_output-1.png)
+![Public IP for running API](./pngs/terraform_output-1.png)
 
 *Public IP for running API from ```python terraform output```*
 
@@ -297,7 +297,7 @@ Commands: `cd infra/terraform`; `terraform init`; `terraform plan -out=tfplan`; 
 
 All tests passed locally (mirrors GitHub Actions).
 
-![Tests using PyTest](<pytest command.png>)
+![Tests using PyTest](./pngs/pytest_command.png)
 *Successful tests using PyTest*
 
 Command: `pytest -q` 
@@ -306,7 +306,7 @@ Command: `pytest -q`
 
 Gate passed: R² ≥ 0.90, p95 ≤ 200ms; `artifacts/postdeploygate.json`.
 
-![postdeploygate.json](image-9.png)
+![postdeploygate.json](./pngs/image-9.png)
 
 *Post-deploy artifact*
 
@@ -316,10 +316,12 @@ Command: `cat artifacts/postdeploygate.json`
 
 Rollback tested: v2 → v1, health verified.
 
-![Before rollout](<kubectl rollout history before-1.png>)
+![Before rollout](./pngs/kubectl_rollout_history_before_1.png)
+
 *Before rollout* 
 
-![After rollout](<kubectl rollout history after-2.png>)
+![After rollout](./pngs/kubectl_rollout_history_after.png)
+
 *After rollout of second deployment*
 
 Command: `kubectl -n default rollout history deployment/predictive-maintenance-api` 
@@ -330,10 +332,12 @@ Command: `kubectl -n default rollout history deployment/predictive-maintenance-a
 
 JSON logs captured prediction events (event=prediction, request_id, model_version, inputs/outputs).
 
-![Running pods in "monitoring" namespace](<kubectl get pods -n monitoring.png>)
+![Running pods in "monitoring" namespace](./pngs/kubectl_get_pods_n_monitoring.png)
+
 *Running pods in "monitoring" namespace*
 
-![Running API in monitoring namespace](<kubectl get servicemonitor.png>)
+![Running API in monitoring namespace](./pngs/kubectl_get_servicemonitor.png)
+
 *Running API in monitoring namespace*
 
 Commands: Send 25 predictions via ```curl; `POD=$(kubectl -n default get pods -l app=predictive-maintenance-api -o jsonpath="{.items[^0].metadata.name}"); kubectl -n default logs $POD --tail=200```
@@ -342,10 +346,10 @@ Commands: Send 25 predictions via ```curl; `POD=$(kubectl -n default get pods -l
 
 ServiceMonitor applied; target UP; p95 visualized.
 
-![Running targets on Prometheus](prometheus_targets-1.png)
+![Running targets on Prometheus](./pngs/prometheus_targets-1.png)
 *Running targets on Prometheus*
 
-![P95-latency-graph](prometheus_promql_query_graph-2.png)
+![P95-latency-graph](./pngs/prometheus_promql_query_graph-2.png)
 *P95-latency-graph*
 
 Commands: `kubectl -n monitoring get servicemonitor`; `kubectl -n monitoring get pods -o wide` 
@@ -354,7 +358,7 @@ Commands: `kubectl -n monitoring get servicemonitor`; `kubectl -n monitoring get
 
 Alert applied; tested to FIRING.
 
-![P95-API-Alert](prometheus_alerts-2.png)
+![P95-API-Alert](./pngs/prometheus_alerts-2.png)
 *P95-Latency API Alert*
 
 Command: `kubectl apply -f infra/k8s/p95-latency-alert.yaml` 
@@ -363,7 +367,7 @@ Command: `kubectl apply -f infra/k8s/p95-latency-alert.yaml`
 
 Job executed; `reports/drift_report.html`, `reports/drift_summary.json`; PSI > 0.2 triggers non-zero exit.
 
-![drift-report-html](drift-reports_html-1.png)
+![drift-report-html](./pngs/drift-reports_html-1.png)
 *HTML Drift Report*
 
 Commands: `kubectl -n default apply -f infra/k8s/drift-check-job.yaml`; `kubectl cp POD:app/reports reports/from_cluster`; `ls -lah reports reports/from_cluster`; `cat reports/drift_summary.json` 
@@ -376,10 +380,11 @@ Pre-requisite for drift job: Create IRSA ServiceAccount via commands in ServiceA
 
 Template generates project; passes pytest.
 
-![Cookiecutter generated repo](<cookiecutter geenrated repo-1.png>)
+![Cookiecutter generated repo](./pngs/cookiecutter_genrated_repo_1.png)
+
 *Cookiecutter generated repo*
 
-![Successful tests run using PyTest in generated repo](<pytest -q cookiecutter generated repo-2.png>)
+![Successful tests run using PyTest in generated repo](./pngs/pytest_q_cookiecutter_generated_repo_2.png)
 *Successful tests run using PyTest in generated repo*
 
 Commands: `cookiecutter cookiecutter-project-slug/ -o tmp`; `cd tmp/...`; `pytest -q` 
@@ -388,7 +393,7 @@ Commands: `cookiecutter cookiecutter-project-slug/ -o tmp`; `cd tmp/...`; `pytes
 
 Docs built from code annotations.
 
-![Sphinx Docs index.html](sphinx-docs-index-html-1.png)
+![Sphinx Docs index.html](./pngs/sphinx-docs-index-html-1.png)
 *Sphinx Docs*
 
 Command: `make -C docs html` 
@@ -397,7 +402,8 @@ Command: `make -C docs html`
 
 Notebooks log to MLflow; runs visible in UI; `notebooks/artifacts/runs_leaderboard.csv`.
 
-![MLFlow UI runs list](<screenshot of MLflow UI runs list-3.png>)
+![MLFlow UI runs list](./pngs/mlflow-ui.png)
+
 *MLFlow UI runs list*
 
 Commands: `mlflow ui`; `jupyter lab` 
