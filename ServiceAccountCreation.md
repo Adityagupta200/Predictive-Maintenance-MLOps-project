@@ -2,7 +2,7 @@
 
 # Creating the IRSA Role for the Drift Job
 
-`ROLE_NAME` is the name of the AWS IAM role that your drift Job’s pods will assume via IRSA (IAM Roles for Service Accounts).[^1]
+`ROLE_NAME` is the name of the AWS IAM role that your drift Job’s pods will assume via IRSA (IAM Roles for Service Accounts).
 
 You create a role (example name: `pm-drift-dvc-reader-role`) and attach a policy that grants read access to the S3 bucket/prefix where your DVC remote stores objects, then you put that role’s ARN in the ServiceAccount annotation `eks.amazonaws.com/role-arn`.
 
