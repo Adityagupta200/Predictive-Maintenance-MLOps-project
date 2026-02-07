@@ -14,7 +14,8 @@ Executes data preprocessing, model training, and evaluation.
 
 **Verification Artifact:**
 
-![MLFlow UI](mlflow-ui.png)![MLFlow UI](<screenshot of MLflow UI runs list.png>)
+![MLFlow UI](./pngs/screenshot_of_MLflow_UI_runs_list_1.png)
+
 *MLFlow UI runs list*
 
 ## 2. API Serving (Local)
@@ -51,8 +52,9 @@ kubectl apply -f infra/k8s/service.yaml
 
 **Verification Artifact:**
 
-![Screenshot of the terminal showing the curl response from the deployed AWS Load Balancer / Kubernetes Service URL.](<kubectl get pods.png>)
-*Screenshot of the terminal showing the curl response from the deployed AWS Load Balancer / Kubernetes Service URL.*
+![Screenshot of the terminal showing the curl response from the deployed AWS Load Balancer / Kubernetes Service URL.](./pngs/kubectl_get_pods.png)
+
+*Running pod in EKS cluster*
 
 ## 4. CI/CD \& Automated Rollback
 
@@ -63,7 +65,7 @@ If accuracy < threshold, the pipeline triggers a rollback to the previous image 
 
 **Verification Artifact:**
 
-![Screenshot of the GitHub Actions workflow run showing the "Deploy" step failing/triggering the "Rollback" job successfully.](rollback_artifacts.png)
+![Screenshot of the GitHub Actions workflow run showing the "Deploy" step failing/triggering the "Rollback" job successfully.](./pngs/rollback_artifacts.png)
 *Screenshot of the GitHub Actions workflow run showing the "Deploy" step failing/triggering the "Rollback" job successfully.*
 
 ## 5. Production Monitoring (Prometheus \& Grafana)
@@ -89,15 +91,15 @@ histogram_quantile(0.95, sum(rate(http_request_latency_seconds_bucket{service="p
 
 **Verification Artifacts:**
 
-![Screenshot of the Grafana Dashboard showing the P95 latency panel.](prometheus_promql_query_graph.png)
+![Screenshot of the Grafana Dashboard showing the P95 latency panel.](./pngs/prometheus_promql_query_graph.png)
 *Screenshot of the Grafana Dashboard showing the P95 latency panel.*
 
-![Screenshot of the Prometheus AlertManager firing the HighLatency alert.](prometheus_alerts.png)
+![Screenshot of the Prometheus AlertManager firing the HighLatency alert.](./pngs/prometheus_alerts.png)
 *Screenshot of the Prometheus AlertManager firing the HighLatency alert.*
 
 ## 6. Data Drift Detection (Evidently AI)
 
-**Prerequisites (IRSA Setup):** Before running the drift check, ensure the drift-dvc-reader service account is created and annotated with the IAM Role ARN (as detailed in ServiceAccountCreationCommands.pdf).
+**Prerequisites (IRSA Setup):** Before running the drift check, ensure the drift-dvc-reader service account is created and annotated with the IAM Role ARN (as detailed in ServiceAccountCreation.md).
 
 **Execute Drift Job:**
 
@@ -115,7 +117,7 @@ kubectl -n default cp "$POD":/app/reports ./reports_from_cluster -c keepalive
 
 **Verification Artifact:**
 
-![Screenshot or snippet of reports_from_cluster/drift_summary.json showing drift_share metrics.](image.png)
+![Screenshot or snippet of reports_from_cluster/drift_summary.json showing drift_share metrics.](./pngs/image.png)
 *Screenshot or snippet of reports_from_cluster/drift_summary.json showing drift_share metrics.*
 
 ***

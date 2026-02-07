@@ -234,7 +234,7 @@ Commands: `ls -lah models`; `python -c "import joblib; m = joblib.load('models/b
 
 Experiments tracked in MLflow UI; exported `notebooks/artifacts/runs_leaderboard.csv`.
 
-![MLFlow UI runs list](pngs\mlflow-ui.png)
+![MLFlow UI runs list](./pngs/mlflow-ui.png)
 *MLFlow UI runs list*
 
 Commands: `ls -lah notebooks/artifacts`; `head -n 20 notebooks/artifacts/runs_leaderboard.csv` 
