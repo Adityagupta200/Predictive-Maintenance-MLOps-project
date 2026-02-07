@@ -2,38 +2,34 @@
 
 Comprehensive MLOps project implementing end-to-end ML pipeline for predictive maintenance using AWS, Kubernetes, MLflow, DVC, Evidently, Prometheus, and GitHub Actions having the following details - 
 
-    1. *End-to-End ML Pipeline Automation*
-		-  Data validation & preprocessing with Pandas/NumPy (feature engineering, missing value
-		 handling)
-		-  Automated model training using Scikit-learn/XGBoost with Optuna for hyperparameter
-		 tuning
-		-  MLflow for experiment tracking, model registry, and metadata logging (accuracy, training
-		 time, hyperparameters)
-		-  DVC for dataset versioning and reproducibility
-	2. *Cloud-Based Deployment Infrastructure*
-		-  AWS EC2 for model hosting with FastAPI REST endpoints
-		-   Docker containerization of entire application (model, API, dependencies)
-		-  Kubernetes orchestration for scaling prediction services
-		-  Terraform for Infrastructure-as-Code IaC) provisioning
-	3. *CI/CD Implementation*
-		-  GitHub Actions for automated testing PyTest and deployment
-		-  Model validation gates checking accuracy thresholds 90%) before production
-		 deployment
-		-  Automated rollback to previous model version if monitoring detects performance
-		 degradation
-	4. *Production Monitoring System*
-		-  Evidently AI dashboards tracking data drift PSI  0.2 triggers alerts)
-		-  Prometheus/Grafana for API latency monitoring 95th percentile < 200ms)
-		-  Custom logging with Loguru capturing prediction inputs/outputs for audit trails
-	5. *Collaboration & Documentation*
-		 - Cookiecutter template enforcing project structure consistency
-		-  Sphinx auto-generated documentation from code annotations
-		-  Jupyter Notebooks with MLflow UI integration showing experimental history
+1. **End-to-End ML Pipeline Automation**
+	- Data validation & preprocessing with Pandas/NumPy (feature engineering, missing value handling)
+	- Automated model training using Scikit-learn/XGBoost with Optuna for hyperparameter tuning
+	-  MLflow for experiment tracking, model registry, and metadata logging (accuracy, training time, hyperparameters)
+	-  DVC for dataset versioning and reproducibility
+2. **Cloud-Based Deployment Infrastructure**
+	-  AWS EC2 for model hosting with FastAPI REST endpoints
+	-   Docker containerization of entire application (model, API, dependencies)
+	-  Kubernetes orchestration for scaling prediction services
+	-  Terraform for Infrastructure-as-Code IaC) provisioning
+3. **CI/CD Implementation**
+	-  GitHub Actions for automated testing PyTest and deployment
+	-  Model validation gates checking accuracy thresholds 90%) before production
+		deployment
+	-  Automated rollback to previous model version if monitoring detects performance
+		degradation
+4. **Production Monitoring System**
+	-  Evidently AI dashboards tracking data drift PSI  0.2 triggers alerts)
+	-  Prometheus/Grafana for API latency monitoring 95th percentile < 200ms)
+	-  Custom logging with Loguru capturing prediction inputs/outputs for audit trails
+5. **Collaboration & Documentation**
+		- Cookiecutter template enforcing project structure consistency
+	-  Sphinx auto-generated documentation from code annotations
+	-  Jupyter Notebooks with MLflow UI integration showing experimental history
 
 ## Project Structure
 
 ```
-
 .
 ├── .dvc/
 │   ├── cache/
