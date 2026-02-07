@@ -1,4 +1,3 @@
-```markdown
 # Predictive Maintenance API with Real-time Monitoring MLOps Project
 
 Comprehensive MLOps project implementing end-to-end ML pipeline for predictive maintenance using AWS, Kubernetes, MLflow, DVC, Evidently, Prometheus, and GitHub Actions having the following details - 
@@ -223,6 +222,7 @@ Commands: `ls -lah artifacts/processed`; `cat artifacts/processed/data_validatio
 Trained model saved as `models/best_model.joblib`.
 
 ![ls -lah models](image-7.png)
+
 *Trained models*
 
 ![model prediction](terraform_predict_output-1.png)
@@ -286,6 +286,7 @@ Commands: `kubectl -n default get pods -o wide`; `kubectl -n default rollout sta
 IaC applied successfully.
 
 ![Public IP for running API](terraform_output-1.png)
+
 *Public IP for running API from ```python terraform output```*
 
 Commands: `cd infra/terraform`; `terraform init`; `terraform plan -out=tfplan`; `terraform apply -auto-approve tfplan`; `terraform output` 
@@ -306,6 +307,7 @@ Command: `pytest -q`
 Gate passed: R² ≥ 0.90, p95 ≤ 200ms; `artifacts/postdeploygate.json`.
 
 ![postdeploygate.json](image-9.png)
+
 *Post-deploy artifact*
 
 Command: `cat artifacts/postdeploygate.json` 
@@ -334,7 +336,7 @@ JSON logs captured prediction events (event=prediction, request_id, model_versio
 ![Running API in monitoring namespace](<kubectl get servicemonitor.png>)
 *Running API in monitoring namespace*
 
-Commands: Send 25 predictions via `curl`; `POD=$(kubectl -n default get pods -l app=predictive-maintenance-api -o jsonpath="{.items[^0].metadata.name}"); kubectl -n default logs $POD --tail=200` 
+Commands: Send 25 predictions via ```curl; `POD=$(kubectl -n default get pods -l app=predictive-maintenance-api -o jsonpath="{.items[^0].metadata.name}"); kubectl -n default logs $POD --tail=200```
 
 ### 4B. Prometheus Scrape & Grafana p95
 
@@ -415,4 +417,3 @@ Commands: `mlflow ui`; `jupyter lab`
 - Infra: AWS (EKS/EC2/S3), Docker, Kubernetes, Terraform
 - CI/CD: GitHub Actions, PyTest
 - Monitoring: Evidently (PSI 0.2), Prometheus/Grafana (p95 200ms), Loguru 
-```
