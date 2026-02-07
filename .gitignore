@@ -16,3 +16,4 @@ _executed
 .ipynb_checkpoints
 infra/terraform/
 artifacts/*
+*.png

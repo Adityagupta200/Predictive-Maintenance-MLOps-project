@@ -1,23 +1,29 @@
-# Notebooks (CMAPSS + MLflow)
+# MLflow Experiments and Comparisons
 
-These notebooks provide recruiter-grade proof of:
-- MLflow experiment tracking (params/metrics/model artifacts)
-- Run comparison and model selection (leaderboard + selection audit)
-- Reproducible MLflow UI demo via a portable tracking URI
+This directory contains Jupyter notebooks for MLflow experiment tracking and run comparisons as per production requirements.
 
-The dataset is NASA C-MAPSS (FD00x) style: time-series per engine (`unit`) over operating cycles (`cycle`), with operational settings + sensor channels, and RUL labels derived from run-to-failure trajectories.  
+## 01_mlflow_experiments.ipynb
 
-## Quickstart
+Execute after starting MLflow UI: `mlflow ui --host 127.0.0.1 --port 5000`.
 
-### 1) Install notebook dependencies
-From repo root:
+- Run the notebook to log training runs.
+![MLflow UI runs list](<screenshot of MLflow UI runs list.png>).
+- Artifact: `notebooks/artifacts/runs_leaderboard.csv` – generated from notebook, shows top runs by metrics.
 
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-source .venv/bin/activate
+Proof command: `head -n 20 notebooks/artifacts/runs_leaderboard.csv`
 
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install -r requirements-api.txt
-pip install -r requirements-notebooks.txt
+## 02_compare_runs.ipynb
+
+Loads runs from MLflow and generates comparison leaderboard.
+
+- Run after 01_mlflow_experiments.ipynb.
+- Compares params, metrics, artifacts across runs.
+![leaderboard CSV preview](image.png)
+
+![p95 latency graph](prometheus_promql_query_graph.png)
+*p95 latency graph*
+
+![evidently drift html report](drift-reports_html.png)
+*Evidently AI HTML drift report*
+
+All notebooks use `requirements-notebooks.txt` and integrate with DVC/MLflow for reproducibility.
