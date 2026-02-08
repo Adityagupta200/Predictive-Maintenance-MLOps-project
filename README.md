@@ -296,6 +296,10 @@ All tests passed locally (mirrors GitHub Actions).
 ![Tests using PyTest](./pngs/pytest_command.png)
 *Successful tests using PyTest*
 
+![alt text](./pngs/image-10.png)
+![alt text](./pngs/image-11.png)
+Successful "ci-cd" workflow run.
+
 Command: `pytest -q` 
 
 ### 3B. Post-Deploy Gate (p95/Accuracy Thresholds)
@@ -311,6 +315,12 @@ Command: `cat artifacts/postdeploygate.json`
 ### 3C. Automated Rollback (K8s Rollout Undo)
 
 Rollback tested: v2 → v1, health verified.
+
+![Drift monitoring workflow runs successfully and triggers rollback](./pngs/image-13.png)
+*Drift monitoring workflow runs successfully and triggers rollback*
+
+![Automated rollback workflow](./pngs/image-12.png)
+*Successful automated rollback* 
 
 ![Before rollout](./pngs/kubectl_rollout_history_before_1.png)
 
@@ -390,6 +400,8 @@ Commands: `cookiecutter cookiecutter-project-slug/ -o tmp`; `cd tmp/...`; `pytes
 Docs built from code annotations.
 
 ![Sphinx Docs index.html](./pngs/sphinx-docs-index-html-1.png)
+![Sphinx Docs index.html](./pngs/sphinx-docs-index-html2.png)
+
 *Sphinx Docs*
 
 Command: `make -C docs html` 
